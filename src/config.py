@@ -18,8 +18,12 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 import yaml
 
 # Sections the current build actually uses. Everything else is validated and ignored.
-IMPLEMENTED_PHASE = 1
-SECTIONS_USED = {"sim", "navigation", "drone_defaults", "drones", "scenario_events"}
+IMPLEMENTED_PHASE = 2
+SECTIONS_USED = {
+    "sim", "navigation", "drone_defaults", "drones", "scenario_events",
+    "geofence", "confirmation", "association", "observation", "confidence", "track", "targets",
+    "inspection",  # candidate_count, for the CONFIRM_HOLD point when the spot above the target is restricted
+}  # fmt: skip
 
 
 class ConfigError(ValueError):
@@ -255,9 +259,13 @@ class NavigationConfig:
     arrival_tolerance: float = 5.0
     alt_tolerance: float = 2.0
     replan_limit: int = 3
+    # Extra offset (m) beyond the geofence margin for planner graph nodes, so a node is never
+    # exactly on a buffered edge (which the edge rule treats as outside). Added in Phase 2.
+    planner_clearance: float = 1.0
 
     def validate(self, p: str) -> None:
         _positive(self.cruise_alt, f"{p}.cruise_alt")
+        _positive(self.planner_clearance, f"{p}.planner_clearance")
         _positive(self.arrival_tolerance, f"{p}.arrival_tolerance")
         _positive(self.alt_tolerance, f"{p}.alt_tolerance")
         _non_negative(self.replan_limit, f"{p}.replan_limit")
@@ -370,7 +378,7 @@ SCENARIO_EVENT_FIELDS: dict[str, dict[str, type]] = {
     "set_battery": {"drone": str, "battery_pct": float},
     "external_cue": {"pos": list},
     "place_target": {"pos": list},
-    "hide_target": {},
+    "hide_target": {},  # optional "target": ground-truth id; default all
     "show_target": {},
 }
 
@@ -534,7 +542,8 @@ def _build_scenario_event(raw: Any, drone_ids: set[str], p: str) -> ScenarioEven
         raise ConfigError(f"{p}.type: unknown event type '{etype}' (known: {', '.join(SCENARIO_EVENT_FIELDS)})")
     spec = SCENARIO_EVENT_FIELDS[etype]
     data = {k: v for k, v in raw.items() if k not in ("t", "type")}
-    extra = sorted(set(data) - set(spec))
+    optional = {"target"} if etype in ("hide_target", "show_target") else set()
+    extra = sorted(set(data) - set(spec) - optional)
     if extra:
         raise ConfigError(f"{p}: unexpected key(s) for '{etype}': {', '.join(extra)}")
     for key, typ in spec.items():

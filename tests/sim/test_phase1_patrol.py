@@ -9,6 +9,7 @@ import yaml
 
 from src.config import config_from_dict, load_config
 from src.drone.agent import Drone
+from src.logging_.event_log import EVENT_TYPES
 from src.main import main as cli_main
 from src.sim.world import World, make_rng
 
@@ -137,9 +138,7 @@ def test_event_log_is_time_ordered_and_typed():
     w, _ = run(load_config(DEFAULT))
     ts = [r["t"] for r in w.log.records]
     assert ts == sorted(ts)
-    assert {r["type"] for r in w.log.records} <= {
-        "WAYPOINT_REACHED", "DRONE_MODE", "SAFETY_RETURN", "HOME_REACHED", "SCENARIO_EVENT", "DRONE_FAILED"
-    }  # fmt: skip
+    assert {r["type"] for r in w.log.records} <= EVENT_TYPES
 
 
 def test_cli_headless_writes_identical_logs(tmp_path):

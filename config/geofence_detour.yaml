@@ -1,0 +1,45 @@
+# Phase 2+: a long restricted "wall" separates the home base (west) from the
+# eastern patrol area and the target. D1 detects and confirms GT-1 in the east,
+# then a battery drop sends it home: its route home must detour around the wall.
+# Sections not listed here use the defaults from PLAN.md section 12.
+
+sim:
+  duration: 300
+  seed: 42
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-WALL
+      polygon: [[900, 300], [1100, 300], [1100, 1700], [900, 1700]]
+
+drones:
+  - id: D1
+    pos: [1400, 800]
+    alt: 60
+    battery_pct: 0.90
+    home: [150, 1000, 0]
+    patrol: [[1400, 800, 60], [1700, 800, 60], [1700, 1200, 60], [1400, 1200, 60]]   # passes 40 m from GT-1
+  - id: D2
+    pos: [300, 500]
+    alt: 60
+    battery_pct: 0.80
+    home: [150, 1000, 0]
+    patrol: [[300, 500, 60], [700, 500, 60], [700, 1500, 60], [300, 1500, 60]]
+  - id: D3
+    pos: [300, 1700]
+    alt: 60
+    battery_pct: 0.80
+    home: [150, 1000, 0]
+    patrol: [[300, 1700, 60], [700, 1700, 60], [700, 1850, 60], [300, 1850, 60]]
+
+targets:
+  - id: GT-1
+    pos: [1660, 1000]
+    alt: 0
+    appear_at: 0
+
+scenario_events:
+  - {t: 120, type: set_battery, drone: D1, battery_pct: 0.25}   # forces a return across the wall

@@ -1,0 +1,46 @@
+# Phase 2+: no real target anywhere. Every sensor produces spurious observations
+# (0.3 per second, confidence U(0.2, 0.6)). None of them may ever reach CONFIRMED.
+
+sim:
+  duration: 300
+  seed: 42
+
+drone_defaults:
+  sensor:
+    false_obs_rate: 0.3
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-1
+      polygon: [[800, 600], [1100, 600], [1100, 1000], [800, 1000]]
+
+drones:
+  - id: D1
+    pos: [200, 300]
+    alt: 60
+    battery_pct: 0.85
+    home: [100, 100, 0]
+    patrol: [[200, 300, 60], [600, 300, 60], [600, 500, 60], [200, 500, 60]]
+  - id: D2
+    pos: [1500, 400]
+    alt: 60
+    battery_pct: 0.70
+    home: [100, 100, 0]
+    patrol: [[1500, 400, 60], [1800, 400, 60], [1800, 900, 60], [1350, 900, 60]]
+  - id: D3
+    pos: [900, 1600]
+    alt: 60
+    battery_pct: 0.60
+    home: [100, 100, 0]
+    patrol: [[900, 1600, 60], [1200, 1600, 60], [1200, 1800, 60], [900, 1800, 60]]
+  - id: D4
+    pos: [1700, 1700]
+    alt: 60
+    battery_pct: 0.95
+    home: [100, 100, 0]
+    patrol: [[1700, 1700, 60], [1850, 1700, 60], [1850, 1850, 60], [1700, 1850, 60]]
+
+targets: []

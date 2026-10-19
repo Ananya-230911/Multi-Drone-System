@@ -1,6 +1,6 @@
 # Default scenario: 4 drones patrol, 1 ground-truth target (PLAN.md section 12).
-# Phase 1 uses sim, navigation, drone_defaults, drones and scenario_events;
-# the other sections are validated now and used by later phases.
+# Phase 2 uses everything except network, heartbeat, allocation, reacquire, inspection
+# and safety (separation); those are validated now and used by later phases.
 
 sim:
   dt: 0.1
@@ -83,6 +83,7 @@ navigation:
   arrival_tolerance: 5.0
   alt_tolerance: 2.0
   replan_limit: 3
+  planner_clearance: 1.0          # added in Phase 2: planner nodes sit this far outside the margin
 
 safety:
   min_separation: 25

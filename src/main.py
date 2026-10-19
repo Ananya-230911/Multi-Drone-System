@@ -55,6 +55,13 @@ def write_outputs(world: World, out_root: Path, run_id: str) -> Path:
         "ticks": world.tick,
         "events": len(world.log.records),
         "event_log_sha256": world.log.digest(),
+        "geofence_violations": len(world.geofence_violations),
+        "false_confirmations": world.false_confirmations(),
+        "targets": {
+            d.id: [{"id": tv.id, "state": tv.state, "confirmation": tv.confirmation, "est_pos": [round(v, 2) for v in tv.est_pos],
+                    "observations": tv.n_obs} for tv in d.targets]
+            for d in world.snapshot.drones
+        },
         "drones": {
             d.id: {"mode": d.mode, "battery_pct": round(d.battery_pct, 4), "pos": [round(d.x, 2), round(d.y, 2)],
                    "alt": round(d.alt, 2), "docked": d.docked}
@@ -83,6 +90,7 @@ def run_gui(world_factory) -> World:
         "normal": pygame.font.Font(None, 22),
         "title": pygame.font.Font(None, 26),
         "mono": pygame.font.SysFont("dejavusansmono,couriernew,monospace", 14),
+        "mono_small": pygame.font.SysFont("dejavusansmono,couriernew,monospace", 12),
     }
     world: World = world_factory()
     renderer = MapRenderer(pygame.Rect(0, 0, MAP_W, WINDOW[1]), world.cfg.sim.map_size)
@@ -111,6 +119,7 @@ def run_gui(world_factory) -> World:
                 elif ev.key == pygame.K_r:
                     world = world_factory()
                     renderer.reset()
+                    ui.targets_hidden = False
                     sim_debt = 0.0
                 elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
                     i = ev.key - pygame.K_1
@@ -121,6 +130,20 @@ def run_gui(world_factory) -> World:
                     world.scenario.inject(world.t, "fail_drone", {"drone": ui.selected})
                 elif ev.key == pygame.K_l:
                     ui.show_legend = not ui.show_legend
+                elif ev.key == pygame.K_g:
+                    ui.show_ground_truth = not ui.show_ground_truth
+                elif ev.key == pygame.K_h:
+                    # Hide / show every ground-truth target (forces track loss). A scenario event, logged.
+                    ui.targets_hidden = not ui.targets_hidden
+                    world.scenario.inject(world.t, "hide_target" if ui.targets_hidden else "show_target")
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1 and renderer.contains(ev.pos):
+                wx, wy = renderer.to_world(*ev.pos)
+                pos = [round(wx, 1), round(wy, 1)]
+                if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                    world.scenario.inject(world.t, "external_cue", {"pos": pos})  # applied from Phase 3
+                else:
+                    # A ground-truth target: the drones still have to detect it with their sensors.
+                    world.scenario.inject(world.t, "place_target", {"pos": pos})
         ui.speed = SPEEDS[speed_idx]
         if not ui.paused and not world.finished:
             sim_debt += wall_dt * ui.speed
@@ -139,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         cfg = apply_overrides(load_config(args.config), args)
+        world = World(cfg)  # geometry checks (geofence, homes, patrol routes) run here, before tick 0
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
@@ -147,7 +171,6 @@ def main(argv: list[str] | None = None) -> int:
     run_id = args.run_id or f"{cfg.name}_seed{cfg.sim.seed}_{time.strftime('%Y%m%d-%H%M%S')}"
 
     if cfg.sim.headless:
-        world = World(cfg)
         run_headless(world)
     else:
         world = run_gui(lambda: World(cfg))

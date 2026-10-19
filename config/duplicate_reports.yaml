@@ -1,0 +1,49 @@
+# Phase 2+: three drones fly over GT-1 within a few seconds of each other, so each
+# creates its own record (T-D1-001, T-D2-001, T-D3-001) before hearing the others.
+# Phase 2 (no messages): each agent holds exactly one record for the target.
+# Phase 3: all agents converge on the smallest ID through MERGE.
+# Drones fly at different altitudes so their paths cross without sharing airspace.
+
+sim:
+  duration: 200
+  seed: 42
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-1
+      polygon: [[800, 600], [1100, 600], [1100, 1000], [800, 1000]]
+
+drones:
+  - id: D1
+    pos: [1200, 1400]
+    alt: 50
+    battery_pct: 0.90
+    home: [100, 100, 0]
+    patrol: [[1200, 1400, 50], [1600, 1400, 50], [1600, 1700, 50], [1200, 1700, 50]]
+  - id: D2
+    pos: [1400, 1200]
+    alt: 60
+    battery_pct: 0.90
+    home: [100, 100, 0]
+    patrol: [[1400, 1200, 60], [1400, 1600, 60], [1750, 1600, 60], [1750, 1200, 60]]
+  - id: D3
+    pos: [1600, 1600]
+    alt: 70
+    battery_pct: 0.90
+    home: [100, 100, 0]
+    patrol: [[1600, 1600, 70], [1200, 1200, 70], [1200, 1100, 70], [1700, 1100, 70]]
+  - id: D4
+    pos: [200, 300]
+    alt: 60
+    battery_pct: 0.90
+    home: [100, 100, 0]
+    patrol: [[200, 300, 60], [600, 300, 60], [600, 500, 60], [200, 500, 60]]
+
+targets:
+  - id: GT-1
+    pos: [1400, 1400]
+    alt: 0
+    appear_at: 0
