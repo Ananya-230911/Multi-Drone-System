@@ -199,7 +199,8 @@ class Tracker:
             and len({o[2] for o in window}) >= c.min_distinct_observers
         ):
             return Confirmation.CONFIRMED
-        if now - rec.created_at > c.timeout:
+        # A cue cannot be checked until a drone is on site (7.9); its on-site timeout is Phase 4.
+        if now - rec.created_at > c.timeout and not rec.is_cue:
             return Confirmation.REJECTED
         return Confirmation.PENDING
 
@@ -221,6 +222,8 @@ class Tracker:
                         "mean_confidence": sum(o[1] for o in window) / len(window) if window else 0.0,
                         "observers": sorted({o[2] for o in window}),
                     }))  # fmt: skip
+                    if result is Confirmation.CONFIRMED:
+                        rec.evidence = [(o[0], o[1], o[2], o[3]) for o in window]
                     ctx = TransitionContext(actor=self.owner_id, now=now)
                     if result is Confirmation.CONFIRMED and rec.state is TargetState.DETECTED:
                         events.append(self._transition_event(apply_transition(rec, TargetState.CONFIRMED, ctx, "criteria_met")))
@@ -238,6 +241,125 @@ class Tracker:
             "from": ev.frm.value, "to": ev.to.value, "row": ev.row, "reason": ev.reason, "by": ev.actor,
         })  # fmt: skip
 
-    def merge_remote(self, msg) -> None:
-        """OBSERVATION / TARGET_STATE / MERGE messages from peers arrive with the network in Phase 3."""
-        raise NotImplementedError("peer messages are added in Phase 3")
+    # ------------------------------------------------------------------ peers (Phase 3)
+
+    def summary(self, target_id: str, with_evidence: bool = False) -> dict:
+        """What this agent tells peers about a record (TARGET_DETECTED, OBSERVATION, TARGET_STATE, BID)."""
+        rec = self.record(target_id)
+        assert rec is not None
+        d = {
+            "target_id": rec.id, "aliases": sorted(rec.aliases), "est_pos": [rec.est_pos[0], rec.est_pos[1]],
+            "alt": rec.est_alt, "source": rec.source, "state": rec.state.value, "confirmation": rec.confirmation.value,
+            "epoch": rec.epoch, "owner": rec.owner, "created_at": rec.created_at, "created_by": rec.created_by,
+        }  # fmt: skip
+        if with_evidence and rec.evidence:
+            d["evidence"] = [list(o) for o in rec.evidence]
+        return d
+
+    def apply_summary(self, summ: dict, sender: str, now: float, known_observers: frozenset[str]) -> RemoteUpdate:
+        """Fold a peer's view of a record into ours: create it if new, link aliases, check its evidence."""
+        out = RemoteUpdate()
+        tid = self.resolve(summ["target_id"])
+        if tid not in self.records:
+            tid = next((self.resolve(a) for a in summ.get("aliases", []) if self.resolve(a) in self.records), tid)
+        rec = self.records.get(tid)
+        if rec is None:
+            if summ.get("state") in ("COMPLETED", "CANCELLED"):
+                return out  # nothing to do for a record we never had that is already over
+            pos = (float(summ["est_pos"][0]), float(summ["est_pos"][1]))
+            rec, ev = new_record(summ["target_id"], summ["source"], float(summ.get("created_at", now)),
+                                 summ.get("created_by", sender), pos, summ.get("alt"))  # fmt: skip
+            rec.history[-1].reason = f"relayed_from:{sender}"
+            rec.relayed = True
+            self.records[rec.id] = rec
+            out.created, out.transition = rec.id, ev
+        out.target_id = rec.id
+        for al in summ.get("aliases", []) + [summ["target_id"]]:
+            if al != rec.id and self.resolve(al) == al and al not in self.records:
+                self.alias_of[al] = rec.id
+                rec.aliases.add(al)
+        if summ.get("evidence") and rec.confirmation is Confirmation.PENDING and not rec.terminal:
+            ok, info = self.check_evidence(summ["evidence"], now, known_observers)
+            if ok:
+                ev_obs = [(float(t), float(c), str(o), str(i)) for t, c, o, i in summ["evidence"]]
+                known = {o[3] for o in rec.observations}
+                rec.observations = sorted(rec.observations + [(t, c, o, i, True) for t, c, o, i in ev_obs if i not in known])
+                self.seen_obs.update(o[3] for o in ev_obs)
+                rec.confirmation, rec.evidence = Confirmation.CONFIRMED, ev_obs
+                out.events.append(TrackerEvent("CONFIRMATION_RESULT", rec.id, rec.epoch, {
+                    "result": "CONFIRMED", "via": f"peer_evidence:{sender}", **info}))  # fmt: skip
+                if rec.state is TargetState.DETECTED:
+                    ctx = TransitionContext(actor=self.owner_id, now=now)
+                    out.events.append(self._transition_event(
+                        apply_transition(rec, TargetState.CONFIRMED, ctx, f"peer_evidence:{sender}")))  # fmt: skip
+        out.merges = self._merge_duplicates(rec.id)
+        out.target_id = self.resolve(rec.id)
+        return out
+
+    def check_evidence(self, evidence: list, now: float, known_observers: frozenset[str]) -> tuple[bool, dict]:
+        """The 7.5 criteria applied to a peer's evidence, in a window ending at its newest observation."""
+        c = self.confirm
+        obs = []
+        for item in evidence:
+            t, conf, observer, obs_id = float(item[0]), float(item[1]), str(item[2]), str(item[3])
+            if t > now + 1e-9 or not 0.0 <= conf <= 1.0 or observer not in known_observers:
+                return False, {"rejected": "invalid_evidence"}
+            obs.append((t, conf, observer, obs_id))
+        if not obs:
+            return False, {"rejected": "empty"}
+        t_end = max(o[0] for o in obs)
+        if now - t_end > c.window:
+            return False, {"rejected": "stale_evidence"}
+        window = {o[3]: o for o in obs if t_end - c.window <= o[0] <= t_end}.values()
+        n = len(window)
+        mean = sum(o[1] for o in window) / n if n else 0.0
+        ok = n >= c.min_observations and mean >= c.min_mean_confidence and len({o[2] for o in window}) >= c.min_distinct_observers
+        return ok, {"observations_in_window": n, "mean_confidence": mean, "observers": sorted({o[2] for o in window})}
+
+    def ingest_remote(self, obs: AgentObservation, target_id: str, now: float) -> list[tuple[str, str]] | None:
+        """A peer's OBSERVATION, already associated by the peer: attach it by ID. None if the ID is unknown."""
+        rec = self.record(target_id)
+        if rec is None or rec.terminal:
+            return None
+        self.seen_obs.add(obs.obs_id)
+        self._attach(rec, obs)
+        return self._merge_duplicates(rec.id)
+
+    def apply_merge(self, survivor: str, alias: str) -> list[tuple[str, str]]:
+        """A peer merged two records. Returns the (survivor, alias) renames applied locally."""
+        s, a = self.resolve(survivor), self.resolve(alias)
+        if s == a:
+            return []
+        keep, drop = sorted([s, a])
+        if keep in self.records and drop in self.records:
+            if self.records[keep].terminal or self.records[drop].terminal:
+                return []
+            self._merge(keep, drop)
+            return [(keep, drop)]
+        if drop in self.records:  # we only know the record under the losing ID: rename it
+            rec = self.records.pop(drop)
+            rec.id = keep
+            rec.aliases.add(drop)
+            self.records[keep] = rec
+            self.alias_of[drop] = keep
+            for al in rec.aliases:
+                if al != keep:
+                    self.alias_of[al] = keep
+            return [(keep, drop)]
+        self.alias_of[drop] = keep
+        return []
+
+    def add_cue(self, cue_id: str, pos, now: float) -> tuple[TargetRecord, TransitionEvent]:
+        """External cue (7.1, 7.9): an unconfirmed record that is never evidence by itself."""
+        rec, ev = new_record(cue_id, "external_cue", now, "EXT", (float(pos[0]), float(pos[1])), 0.0)
+        self.records[cue_id] = rec
+        return rec, ev
+
+
+@dataclass
+class RemoteUpdate:
+    target_id: str | None = None
+    created: str | None = None
+    transition: TransitionEvent | None = None
+    merges: list[tuple[str, str]] = field(default_factory=list)
+    events: list[TrackerEvent] = field(default_factory=list)

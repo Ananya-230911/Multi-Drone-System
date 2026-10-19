@@ -14,12 +14,16 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIGS = ["default", "geofence_detour", "target_in_restricted", "false_observation", "duplicate_reports"]
 
 
-def cfg(name, **sim):
+def cfg(name, isolated=False, **sim):
+    """Load a scenario. `isolated=True` switches the radio off (1 m range): Phase 2 behaviour,
+    where each agent tracks targets only with its own sensor."""
+    import dataclasses
+
     c = load_config(ROOT / "config" / f"{name}.yaml")
     if sim:
-        import dataclasses
-
         c = dataclasses.replace(c, sim=dataclasses.replace(c.sim, **sim))
+    if isolated:
+        c = dataclasses.replace(c, network=dataclasses.replace(c.network, comm_range=1.0))
     return c
 
 
@@ -33,7 +37,7 @@ def records(world):
 
 @pytest.fixture(scope="module")
 def default_world():
-    w = World(cfg("default"))
+    w = World(cfg("default", isolated=True))
     w.run()
     return w
 
@@ -44,11 +48,12 @@ def default_world():
 @pytest.mark.parametrize("name", CONFIGS)
 def test_no_position_outside_geofence_and_every_route_valid(name):
     w = World(cfg(name))
-    while not w.finished:  # asserted every tick
-        snap = w.step()
-        for d in snap.drones:
-            if d.mode != "LANDED":
-                assert w.fence.violation(d.x, d.y, d.alt) is None, (snap.t, d.id, d.x, d.y, d.alt)
+    while not w.finished:  # asserted every tick, on each drone's actual position
+        w._advance()
+        for d in w.drones.values():
+            st = d.state
+            if st.mode.value != "LANDED":
+                assert w.fence.violation(st.x, st.y, st.alt) is None, (w.t, st.id, st.x, st.y, st.alt)
     assert w.geofence_violations == []
     planned = w.log.of_type("ROUTE_PLANNED")
     for ev in planned:
@@ -64,15 +69,18 @@ def test_default_detector_creates_and_confirms_record(default_world):
     recs = records(w)
     assert [t.id for t in recs["D2"]] == ["T-D2-001"]
     t = recs["D2"][0]
-    assert t.state == "CONFIRMED" and t.confirmation == "CONFIRMED"
+    assert t.confirmation == "CONFIRMED"
+    # Radio off: D2 hears no peers, so from Phase 3 its own auction allocates the target to itself.
+    assert t.state == "ALLOCATED" and t.owner == "D2"
     gt = w.cfg.targets[0].pos
     assert abs(t.est_pos[0] - gt[0]) < 10 and abs(t.est_pos[1] - gt[1]) < 10
     assert all(not recs[d] for d in ("D1", "D3", "D4"))  # no messages yet: only the detector knows
 
 
-def test_default_lifecycle_stops_at_confirmed(default_world):
+def test_default_lifecycle_detect_confirm_then_allocate(default_world):
     trans = [(e["data"]["from"], e["data"]["to"], e["data"]["row"]) for e in default_world.log.of_type("TARGET_TRANSITION")]
-    assert trans == [("UNKNOWN", "DETECTED", 1), ("DETECTED", "CONFIRMED", 2)]
+    # Phase 2 ends at row 2; with the radio off the Phase 3 auction then commits D2 alone (row 5).
+    assert trans == [("UNKNOWN", "DETECTED", 1), ("DETECTED", "CONFIRMED", 2), ("CONFIRMED", "ALLOCATED", 5)]
 
 
 def test_default_confirm_hold_entered_and_left(default_world):
@@ -122,7 +130,7 @@ def test_route_home_detours_around_wall():
     assert w.fence.horizontal_segment_violation(route[0][:2], route[-1][:2]) == "CROSSES_ZONE:RZ-WALL"
     d1 = w.snapshot.drone("D1")
     assert (d1.x, d1.y, d1.alt) == pytest.approx((150, 1000, 0)) and d1.docked
-    assert [t.state for t in records(w)["D1"]] == ["CONFIRMED"]
+    assert [t.confirmation for t in records(w)["D1"]] == ["CONFIRMED"]
 
 
 # ------------------------------------------------------------------ target_in_restricted.yaml
@@ -145,12 +153,12 @@ def test_target_inside_zone_seen_from_edge_but_never_overflown():
 
 
 def test_each_detector_holds_one_local_record():
-    w = World(cfg("duplicate_reports"))
+    w = World(cfg("duplicate_reports", isolated=True))
     w.run()
     recs = records(w)
     for d in ("D1", "D2", "D3"):
         assert [t.id for t in recs[d]] == [f"T-{d}-001"]
-        assert recs[d][0].state == "CONFIRMED"
+        assert recs[d][0].confirmation == "CONFIRMED"
     assert recs["D4"] == []
 
 
@@ -253,7 +261,7 @@ def test_place_target_event_is_detected_by_sensor():
     w.run()
     scen = w.log.of_type("SCENARIO_EVENT")[0]["data"]
     assert scen["applied"] and scen["target"] == "GT-1"
-    assert [t.state for t in records(w)["D1"]] == ["CONFIRMED"]
+    assert [t.confirmation for t in records(w)["D1"]] == ["CONFIRMED"]
 
 
 def test_hide_and_show_events():

@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from src.sim.ground_truth import GroundTruth
 
 # Event types this phase applies. Others are accepted, logged and ignored.
-IMPLEMENTED = {"fail_drone", "set_battery", "place_target", "hide_target", "show_target"}
-PHASE_OF = {"external_cue": 3}
+IMPLEMENTED = {"fail_drone", "set_battery", "place_target", "hide_target", "show_target", "external_cue"}
+PHASE_OF: dict[str, int] = {}
 
 
 @dataclass(order=True)
@@ -34,6 +34,7 @@ class _Pending:
 class Scenario:
     def __init__(self, events: list[ScenarioEventConfig]):
         self._seq = 0
+        self._cues = 0
         self._pending: list[_Pending] = []
         for e in events:
             self._push(e.t, e.type, dict(e.data), "config")
@@ -68,6 +69,15 @@ class Scenario:
             changed = gt.set_hidden(p.type == "hide_target", p.data.get("target"))
             p.data["targets"] = changed
             return bool(changed), "" if changed else "no ground-truth targets"
+        if p.type == "external_cue":
+            # "Possible target here": coordinates sent to every live drone. Never evidence (7.1).
+            self._cues += 1
+            cue_id = f"T-EXT-{self._cues:03d}"
+            p.data["target"] = cue_id
+            for did in sorted(drones):
+                if drones[did].state.mode.value != "FAILED":
+                    drones[did].inject_cue(now, cue_id, p.data["pos"])
+            return True, ""
         drone = drones.get(p.data.get("drone", ""))
         if drone is None:
             return False, f"unknown drone {p.data.get('drone')!r}"

@@ -163,24 +163,27 @@ def inspection_point(
     standoff_alt: float,
     candidate_count: int,
     from_pos: Point2 | None = None,
+    standoff: float = 0.0,
 ) -> Waypoint | None:
     """A geofence-valid point at `standoff_alt` inside the sensor radius of the target.
 
-    1. Directly above the target, if allowed.
-    2. Otherwise, along the straight approach from `from_pos`, the allowed point
-       closest to the target that is still inside `r_eff`.
+    1. The preferred point: `standoff` metres from the target on the straight approach
+       from `from_pos` (directly above the target when `standoff` is 0), if allowed.
+    2. Otherwise, along that approach, the allowed point closest to the target that is
+       still inside `r_eff`.
     3. Otherwise `candidate_count` points on the circle of radius 0.9 * r_eff,
        picking the one with the shortest horizontal path from `from_pos`.
     Returns None when none of these is valid (e.g. the target is deep inside a zone).
     """
     f = planner.fence
     tx, ty = target_pos
-    above = (tx, ty, standoff_alt)
-    if validate_point(above, f) is None:
-        return above
-    if from_pos is not None and math.dist(from_pos, target_pos) > _EPS:
-        d = math.dist(from_pos, target_pos)
-        ux, uy = (from_pos[0] - tx) / d, (from_pos[1] - ty) / d
+    d = math.dist(from_pos, target_pos) if from_pos is not None else 0.0
+    ux, uy = ((from_pos[0] - tx) / d, (from_pos[1] - ty) / d) if d > _EPS else (0.0, 0.0)
+    s = min(standoff, d, r_eff)  # never past the drone, never outside the sensor radius
+    preferred = (tx + ux * s, ty + uy * s, standoff_alt)
+    if validate_point(preferred, f) is None:
+        return preferred
+    if d > _EPS:
         approach = LineString([(tx, ty), (tx + ux * r_eff, ty + uy * r_eff)])
         inside = approach.intersection(f.allowed)
         if not inside.is_empty:

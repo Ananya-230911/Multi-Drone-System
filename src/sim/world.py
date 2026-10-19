@@ -2,10 +2,11 @@
 
 Tick:
   1. scenario.apply(t)
-  2. (network.deliver -- Phase 3)
-  3. each drone, in sorted ID order: drone.step(t, dt, sensor_view)
-  4. record: drain agent events into the event log, measure true geofence
-     violations (evaluation only, never fed back), build the Snapshot
+  2. network.deliver(t): due messages into inboxes
+  3. each drone, in sorted ID order: drone.step(t, dt, sensor_view); then its
+     events go to the log and its outbox to the network
+  4. record: measure true geofence and separation violations (evaluation only,
+     never fed back to agents), build the Snapshot
 
 The world owns ground truth and the per-drone sensor models. A drone only
 ever receives the `sensor_view` closure for its own sensor, which returns
@@ -14,15 +15,20 @@ observations with the ground-truth `is_spurious` flag stripped.
 
 from __future__ import annotations
 
+import math
 import zlib
 
 import numpy as np
 
+from src.allocation.baseline import optimal
+from src.allocation.cost import BidderState, CostConfig
+from src.comms.network import CommNetwork
 from src.config import Config, ConfigError
 from src.drone.agent import Drone, SharedContext
 from src.drone.sensor import Sensor
 from src.logging_.event_log import EventLog
 from src.safety.geofence import Geofence
+from src.safety.planner import Planner
 from src.safety.route_validator import validate_route
 from src.sim.ground_truth import GroundTruth
 from src.sim.scenario import Scenario
@@ -30,6 +36,7 @@ from src.tracking.observation import AgentObservation, Observation
 from src.viz.snapshot import FenceView, GroundTruthView, Snapshot
 
 RECENT_EVENTS = 200  # events kept in the snapshot for the dashboard
+RECENT_MESSAGES = 120  # message outcomes kept in the snapshot for the dashboard
 
 
 def make_rng(seed: int, component: str) -> np.random.Generator:
@@ -75,35 +82,60 @@ class World:
             confidence=cfg.confidence,
             track=cfg.track,
             inspection=cfg.inspection,
+            allocation=cfg.allocation,
+            heartbeat=cfg.heartbeat,
+            safety=cfg.safety,
+            max_message_age=cfg.network.max_message_age,
         )
         ordered = sorted(cfg.drones, key=lambda d: d.id)
         self.drones: dict[str, Drone] = {d.id: Drone(d, shared) for d in ordered}
         self.sensors: dict[str, Sensor] = {
             d.id: Sensor(d.id, d.params.sensor, cfg.confidence, make_rng(cfg.sim.seed, f"sensor:{d.id}")) for d in ordered
         }
+        self.network = CommNetwork(cfg.network, make_rng(cfg.sim.seed, "network"),
+                                   {d.id: d.params.comm_range for d in ordered}, self.log)  # fmt: skip
         self.observations: list[Observation] = []  # every observation produced, with ground-truth flags (eval only)
         self.geofence_violations: list[tuple[float, str, str]] = []  # (t, drone, reason), measured from true state
-        self.snapshot = self._build_snapshot()
+        self.separation_violations: list[tuple[float, str, str, float]] = []  # (t, a, b, distance), true state
+        self._close_pairs: set[tuple[str, str]] = set()
+        # True drone states when each allocation started, for the centralized baseline (evaluation only).
+        self.allocation_starts: dict[tuple[str, int], dict] = {}
+        self._snapshot: Snapshot | None = None
+
+    @property
+    def snapshot(self) -> Snapshot:
+        """Read-only view of the current tick, built on first access (headless runs rarely need it)."""
+        if self._snapshot is None:
+            self._snapshot = self._build_snapshot()
+        return self._snapshot
 
     @property
     def finished(self) -> bool:
         return self.tick >= self.n_ticks
 
     def step(self) -> Snapshot:
+        """Advance one tick and return the snapshot (built for the caller)."""
+        self._advance()
+        return self.snapshot
+
+    def _advance(self) -> None:
         if self.finished:
-            return self.snapshot
+            return
         self.tick += 1
         # Integer tick counter avoids accumulating floating-point error in the clock.
         self.t = round(self.tick * self.dt, 9)
         self.scenario.apply(self.t, self.drones, self.ground_truth, self.log)
+        failed = self._failed()
+        self.network.deliver(self.t, {i: d.inbox for i, d in self.drones.items()}, failed)
         for drone_id in sorted(self.drones):
-            self.drones[drone_id].step(self.t, self.dt, self._sensor_view(drone_id))
+            agent = self.drones[drone_id]
+            agent.step(self.t, self.dt, self._sensor_view(drone_id))
+            self._drain(agent)
         self._record()
-        return self.snapshot
 
     def run(self) -> Snapshot:
         while not self.finished:
-            self.step()
+            self._advance()
         return self.snapshot
 
     def _sensor_view(self, drone_id: str):
@@ -126,18 +158,82 @@ class World:
                     out.append((d.id, tv.id))
         return out
 
-    def _record(self) -> None:
-        for drone_id in sorted(self.drones):
-            agent = self.drones[drone_id]
-            self.log.extend(agent.events)
-            agent.events.clear()
-        self.snapshot = self._build_snapshot()
+    def _failed(self) -> set[str]:
+        return {i for i, d in self.drones.items() if d.state.mode.value == "FAILED"}
+
+    def _drain(self, agent: Drone) -> None:
+        for ev in agent.events:
+            if ev["type"] == "BID_COMPUTED":
+                key = (ev["target_id"], ev["epoch"])
+                if key not in self.allocation_starts:
+                    self.allocation_starts[key] = {"t": self.t, "target_est": tuple(ev["data"]["target_est"]),
+                                                   "drones": [d.export_view() for _, d in sorted(self.drones.items())]}  # fmt: skip
+        self.log.extend(agent.events)
+        agent.events.clear()
+        msgs = agent.outbox.drain()
+        if msgs:
+            positions = {i: d.state.pos3 for i, d in self.drones.items()}
+            failed = self._failed()
+            for m in msgs:
+                self.network.send(m, self.t, positions, failed)
+
+    def baseline_results(self) -> list[dict]:
+        """Decentralized owner vs centralized optimum for every allocation (evaluation only, after the run)."""
+        alias = {}
         for d in self.snapshot.drones:
-            if d.mode == "LANDED":
+            for tv in d.targets:
+                for a in tv.aliases:
+                    alias[a] = tv.id
+        committed: dict[tuple[str, int], dict[str, str]] = {}
+        for ev in self.log.of_type("ALLOCATION_COMMITTED"):
+            key = (alias.get(ev["target_id"], ev["target_id"]), ev["epoch"])
+            committed.setdefault(key, {})[ev["actor"]] = ev["data"]["winner"]
+        planner = Planner(self.fence, self.cfg.navigation.cruise_alt, self.cfg.navigation.planner_clearance)
+        cost_cfg = CostConfig(self.cfg.allocation.weights, self.cfg.inspection, self.cfg.confidence)
+        params = {d.id: d.params for d in self.cfg.drones}
+        out = []
+        for (tid, epoch), start in sorted(self.allocation_starts.items(), key=lambda kv: kv[1]["t"]):
+            key = (alias.get(tid, tid), epoch)
+            bidders = [
+                BidderState(v.id, (v.x, v.y, v.alt), v.battery_wh, params[v.id], v.home, v.mode, v.docked,
+                            busy=v.current_task is not None and alias.get(v.current_task, v.current_task) != key[0])
+                for v in start["drones"] if v.mode != "FAILED"
+            ]  # fmt: skip
+            winner, bids = optimal(bidders, key[0], start["target_est"], planner, cost_cfg)
+            dec = committed.get(key, {})
+            out.append({"target_id": key[0], "epoch": epoch, "t": start["t"], "baseline_winner": winner,
+                        "committed": dec, "agree": len(set(dec.values())) <= 1,
+                        "match": bool(dec) and set(dec.values()) == {winner},
+                        "baseline_bids": {b.drone: (b.feasible, b.value, b.reason) for b in bids}})  # fmt: skip
+        if out:  # merged duplicates can start several auctions for one target; keep the first per key
+            seen, uniq = set(), []
+            for r in out:
+                if (r["target_id"], r["epoch"]) not in seen:
+                    seen.add((r["target_id"], r["epoch"]))
+                    uniq.append(r)
+            out = uniq
+        return out
+
+    def _record(self) -> None:
+        self._snapshot = None
+        states = [self.drones[i].state for i in sorted(self.drones)]
+        for st in states:
+            if st.mode.value == "LANDED":
                 continue  # an emergency landing is allowed to go below the altitude floor
-            reason = self.fence.violation(d.x, d.y, d.alt)
+            reason = self.fence.violation(st.x, st.y, st.alt)
             if reason:
-                self.geofence_violations.append((self.t, d.id, reason))
+                self.geofence_violations.append((self.t, st.id, reason))
+        airborne = [st for st in states if st.alt > 0.0]
+        for i, a in enumerate(airborne):
+            for b in airborne[i + 1:]:
+                pair = (a.id, b.id)
+                dist = math.dist(a.pos3, b.pos3)
+                if dist < self.cfg.safety.min_separation:
+                    if pair not in self._close_pairs:
+                        self._close_pairs.add(pair)
+                        self.separation_violations.append((self.t, a.id, b.id, dist))
+                else:
+                    self._close_pairs.discard(pair)
 
     def _build_snapshot(self) -> Snapshot:
         f = self.fence
@@ -161,4 +257,8 @@ class World:
             ),
             recent_events=tuple(self.log.tail(RECENT_EVENTS)),
             geofence_violations=len(self.geofence_violations),
+            messages=tuple(list(self.network.history)[-RECENT_MESSAGES:]),
+            network_stats=dict(self.network.stats),
+            separation_violations=len(self.separation_violations),
+            comm_range=self.cfg.network.comm_range,
         )

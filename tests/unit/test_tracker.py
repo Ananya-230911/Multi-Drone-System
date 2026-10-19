@@ -177,6 +177,79 @@ def test_freshness_transitions():
     assert ev and ev[-1].data == {"from": "FRESH", "to": "LOST"}
 
 
-def test_merge_remote_is_phase3():
-    with pytest.raises(NotImplementedError):
-        tracker().merge_remote(None)
+# ------------------------------------------------------------------ peer messages (Phase 3)
+
+KNOWN = frozenset({"D1", "D2", "D3", "EXT"})
+
+
+def summary(tid="T-D2-001", pos=(100.0, 100.0), evidence=None, **kw):
+    d = {"target_id": tid, "aliases": [], "est_pos": list(pos), "alt": 0.0, "source": "sensor", "state": "DETECTED",
+         "confirmation": "PENDING", "epoch": 0, "owner": None, "created_at": 1.0, "created_by": "D2", **kw}
+    if evidence is not None:
+        d["evidence"] = evidence
+    return d
+
+
+def test_peer_summary_creates_relayed_record_with_peer_id():
+    tr = tracker()
+    u = tr.apply_summary(summary(), "D2", 2.0, KNOWN)
+    assert u.created == "T-D2-001" and u.transition.row == 1
+    rec = tr.record("T-D2-001")
+    assert rec.relayed and rec.source == "sensor" and rec.confirmation is Confirmation.PENDING
+    assert tr.apply_summary(summary(), "D2", 2.5, KNOWN).created is None  # known: not created twice
+
+
+def test_peer_evidence_confirms_only_if_it_meets_the_criteria():
+    tr = tracker()
+    weak = [[1.0, 0.5, "D2", "D2-1"], [1.5, 0.5, "D2", "D2-2"], [2.0, 0.5, "D2", "D2-3"]]
+    tr.apply_summary(summary(evidence=weak, confirmation="CONFIRMED"), "D2", 2.1, KNOWN)
+    assert tr.record("T-D2-001").confirmation is Confirmation.PENDING  # mean 0.5 < 0.6
+    good = [[1.0, 0.8, "D2", "D2-4"], [1.5, 0.8, "D2", "D2-5"], [2.0, 0.8, "D2", "D2-6"]]
+    u = tr.apply_summary(summary(evidence=good, confirmation="CONFIRMED"), "D2", 2.1, KNOWN)
+    rec = tr.record("T-D2-001")
+    assert rec.confirmation is Confirmation.CONFIRMED and rec.state is TargetState.CONFIRMED
+    assert any(e.type == "TARGET_TRANSITION" and e.data["row"] == 2 for e in u.events)
+
+
+def test_peer_evidence_rejected_when_stale_or_from_unknown_observer():
+    tr = tracker()
+    good = [[1.0, 0.8, "D2", "a"], [1.5, 0.8, "D2", "b"], [2.0, 0.8, "D2", "c"]]
+    assert tr.check_evidence(good, 9.0, KNOWN)[0] is False  # newest evidence 7 s old > 5 s window
+    bad = [[1.0, 0.8, "D9", "a"], [1.5, 0.8, "D2", "b"], [2.0, 0.8, "D2", "c"]]
+    assert tr.check_evidence(bad, 2.1, KNOWN)[0] is False
+
+
+def test_peer_report_near_own_record_merges_into_smallest_id():
+    tr = Tracker("D3", ASSOC, CONF, TRACK)
+    tr.ingest(obs(1.0, 100, 100, observer="D3"), 1.0)  # T-D3-001
+    u = tr.apply_summary(summary("T-D1-001", pos=(105.0, 100.0), created_by="D1"), "D1", 1.1, KNOWN)
+    assert u.merges == [("T-D1-001", "T-D3-001")]
+    assert list(tr.records) == ["T-D1-001"] and tr.record("T-D3-001").id == "T-D1-001"
+
+
+def test_merge_message_renames_record_known_only_by_losing_id():
+    tr = Tracker("D3", ASSOC, CONF, TRACK)
+    tr.ingest(obs(1.0, 100, 100, observer="D3"), 1.0)  # T-D3-001
+    assert tr.apply_merge("T-D1-001", "T-D3-001") == [("T-D1-001", "T-D3-001")]
+    assert list(tr.records) == ["T-D1-001"]
+    assert tr.resolve("T-D3-001") == "T-D1-001"
+    assert tr.apply_merge("T-D1-001", "T-D3-001") == []  # repeated MERGE is a no-op
+
+
+def test_peer_observation_attaches_by_id_and_counts_as_evidence():
+    tr = tracker()
+    tr.apply_summary(summary(), "D2", 1.0, KNOWN)
+    for k in range(3):
+        o = AgentObservation(f"D2-{k}", "D2", "relayed", 1.0 + 0.5 * k, (100.0, 100.0), 0.0, 0.8)
+        assert tr.ingest_remote(o, "T-D2-001", 1.0 + 0.5 * k) == []
+    tr.update(2.0)
+    assert tr.record("T-D2-001").confirmation is Confirmation.CONFIRMED
+    assert tr.ingest_remote(obs(2.0, 1, 1), "T-UNKNOWN", 2.0) is None
+
+
+def test_external_cue_record_never_times_out_before_verification():
+    tr = tracker()
+    rec, ev = tr.add_cue("T-EXT-001", (100, 100), 1.0)
+    assert rec.source == "external_cue" and rec.state is TargetState.DETECTED and ev.row == 1
+    tr.update(100.0)  # far beyond confirmation.timeout
+    assert tr.record("T-EXT-001").confirmation is Confirmation.PENDING

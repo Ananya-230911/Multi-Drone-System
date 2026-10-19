@@ -9,14 +9,20 @@ ground truth (section 4.1). Its sensor output arrives through the
 Events the drone produces are queued in `self.events`; the world drains them
 into the event log after each step.
 
-Tick (section 4.2, the parts built so far):
-  2. sense -> validate -> tracker
+Tick (section 4.2):
+  1. read inbox -> peer table, tracker, auction tables  (coordination.py)
+  2. sense -> validate -> tracker; share observations
   3. tracker updates confirmation / lifecycle / freshness (local view)
+  4. allocation step: bid / compare / commit             (coordination.py)
   5. drone FSM: battery checks, CONFIRM_HOLD entry/exit, SAFETY_HOLD replanning
-  6-7. routes come from the planner (validated); the monitor checks every step
+  6-7. routes come from the planner (validated); the monitor checks every step,
+       including predicted separation from peers (heartbeats only)
   8. navigation moves the drone; battery drains
+  9. heartbeat; outbound messages wait in `self.outbox` for the world to send
 
-Phase 2 modes: PATROL, CONFIRM_HOLD, RETURNING, SAFETY_HOLD, LANDED, FAILED.
+Modes so far: PATROL, CONFIRM_HOLD, RETURNING, SAFETY_HOLD, LANDED, FAILED.
+Phase 3 stops at ownership: the owner is chosen and announced but does not fly
+to the target yet (ENROUTE is Phase 4).
 """
 
 from __future__ import annotations
@@ -26,17 +32,21 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from src.config import (
+    AllocationConfig,
     AssociationConfig,
     ConfidenceConfig,
     ConfirmationConfig,
     DroneConfig,
+    HeartbeatConfig,
     InspectionConfig,
     NavigationConfig,
     ObservationConfig,
     Point3,
+    SafetyConfig,
     TrackConfig,
 )
 from src.drone.battery import Battery, EnergyModel, route_cost
+from src.drone.coordination import CoordinationMixin
 from src.drone.fsm import DroneMode, check_transition
 from src.drone.navigation import Navigator, StepResult
 from src.drone.sensor import confidence_category, effective_radius
@@ -67,6 +77,10 @@ class SharedContext:
     confidence: ConfidenceConfig
     track: TrackConfig
     inspection: InspectionConfig
+    allocation: AllocationConfig
+    heartbeat: HeartbeatConfig
+    safety: SafetyConfig
+    max_message_age: float
 
 
 @dataclass(frozen=True)
@@ -111,9 +125,35 @@ class DroneView:
     targets: tuple[TargetView, ...] = ()
     hold_target: str | None = None
     safety_reason: str | None = None
+    alive_peers: tuple[str, ...] = ()
+    auctions: tuple["AuctionView", ...] = ()
+    yielding_to: str | None = None
 
 
-class Drone:
+@dataclass(frozen=True)
+class BidView:
+    drone: str
+    feasible: bool
+    value: float | None
+    reason: str
+    t_go: float | None
+    e_need: float | None
+    batt_after: float | None
+    cost: float | None
+
+
+@dataclass(frozen=True)
+class AuctionView:
+    target_id: str
+    epoch: int
+    status: str
+    winner: str | None
+    winning_bid: float | None
+    bids: tuple[BidView, ...]
+    heard: tuple[str, ...]
+
+
+class Drone(CoordinationMixin):
     def __init__(self, cfg: DroneConfig, shared: SharedContext):
         p = cfg.params
         self.id = cfg.id
@@ -142,26 +182,25 @@ class Drone:
         self._safety_goal: tuple[Point3, Then, int] | None = None
         self._replan_attempts = 0
         self.safety_reason: str | None = None
-        self.inbox: list[Any] = []  # filled by CommNetwork from Phase 3
         self.events: list[dict[str, Any]] = []
+        self._init_coordination()  # inbox, outbox, peer table, auction
 
     # ------------------------------------------------------------------ tick
 
     def step(self, now: float, dt: float, sensor_view: SensorView = None) -> None:
-        mode = self.state.mode
-        if mode is DroneMode.FAILED:
-            return
-        if mode is DroneMode.LANDED:
-            self._descend_to_ground(dt)
-            return
+        if self.state.mode is DroneMode.FAILED:
+            return  # sends nothing, does nothing
+        self._read_inbox(now)
         observed = self._sense(now, sensor_view)
-        for ev in self.tracker.update(now):
-            self._emit(now, ev.type, ev.data, target_id=ev.target_id, epoch=ev.epoch)
-        self._decide(now, dt, observed)
+        self._on_tracker_events(now, self.tracker.update(now))
+        self._allocation_step(now)
+        if self.state.mode is not DroneMode.LANDED:
+            self._decide(now, dt, observed)
         if self.state.mode is DroneMode.LANDED:
             self._descend_to_ground(dt)
         else:
             self._move(now, dt)
+        self._heartbeat(now)
 
     # ------------------------------------------------------------------ 2-3. sense and track
 
@@ -183,13 +222,15 @@ class Drone:
                 self._emit(now, "TARGET_TRANSITION",
                            {"from": "UNKNOWN", "to": "DETECTED", "row": 1, "reason": upd.transition.reason, "by": self.id},
                            target_id=upd.target_id, epoch=0)  # fmt: skip
-            for survivor, alias in upd.merges:
-                self._emit(now, "TARGET_MERGED", {"survivor": survivor, "alias": alias}, target_id=survivor)
+            self._handle_merges(now, upd.merges)
             tid = self.tracker.resolve(upd.target_id)
+            if upd.transition is not None:
+                self._announce_target(now, tid)
             self._emit(now, "OBSERVATION", {
                 "obs_id": obs.obs_id, "pos": list(obs.pos), "confidence": obs.confidence,
                 "category": confidence_category(obs.confidence, self.shared.confidence),
             }, target_id=tid)  # fmt: skip
+            self._share_observation(now, tid, obs)
             observed.append(tid)
         return observed
 
@@ -382,6 +423,18 @@ class Drone:
             self._hover(dt)
             self._enter_safety_hold(now, verdict)
             return
+        vel = ((res.x - s.x) / dt, (res.y - s.y) / dt, (res.alt - s.alt) / dt)
+        sep = monitor.check_separation(self.id, s.pos3, vel, s.current_task is not None, self.peer_tracks(now), self.shared.safety)
+        if not sep.ok:
+            # Yield = HOLD until clear. Not a SAFETY_HOLD: nothing is wrong with the route.
+            self.navigator.index, self.navigator.finished = saved
+            self._hover(dt)
+            other = sep.reason.split(":", 1)[1]
+            if self._yielding_to != other:
+                self._yielding_to = other
+                self._emit(now, "SEPARATION_YIELD", {"to": other, "pos": [s.x, s.y], "alt": s.alt})
+            return
+        self._yielding_to = None
         self._apply_motion(res, dt)
         self._on_progress(now, res)
 
@@ -495,7 +548,19 @@ class Drone:
             route=tuple(self.navigator.remaining()) if flying and not self.on_patrol_loop else (),
             patrol_route=tuple(s.patrol_route), r_eff=effective_radius(s.params.sensor, s.alt),
             targets=targets, hold_target=self.hold_target, safety_reason=self.safety_reason,
+            alive_peers=tuple(sorted(self.alive_peers(self._last_heartbeat or 0.0))),
+            auctions=tuple(self._auction_view(tid) for tid in sorted(self.auction.entries)),
+            yielding_to=self._yielding_to,
         )  # fmt: skip
+
+    def _auction_view(self, tid: str) -> AuctionView:
+        e = self.auction.entries[tid]
+        bids = tuple(
+            BidView(b.drone, b.feasible, b.value, b.reason, b.breakdown.get("t_go"), b.breakdown.get("E_need"),
+                    b.breakdown.get("batt_after"), b.breakdown.get("cost"))
+            for _, b in sorted(e.bids.items())
+        )  # fmt: skip
+        return AuctionView(tid, e.epoch, e.status, e.winner, e.winning_bid, bids, tuple(sorted(e.heard)))
 
     # ------------------------------------------------------------------ helpers
 

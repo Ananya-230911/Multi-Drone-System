@@ -37,7 +37,21 @@ TARGET_STYLE: dict[str, tuple[tuple[int, int, int], str, str]] = {
     "COMPLETED": ((120, 255, 120), "star", "DONE"),
     "CANCELLED": ((120, 120, 120), "cross", "CXL"),
 }
-PHASE_TARGET_STATES = ("DETECTED", "CONFIRMED", "CANCELLED")
+PHASE_TARGET_STATES = ("DETECTED", "CONFIRMED", "ALLOCATED", "CANCELLED")
+
+# message type -> colour of the flash line / message log entry
+MSG_COLOURS: dict[str, tuple[int, int, int]] = {
+    "HEARTBEAT": (90, 100, 120),
+    "TARGET_DETECTED": (255, 215, 0),
+    "OBSERVATION": (200, 180, 90),
+    "TARGET_STATE": (255, 140, 40),
+    "MERGE": (230, 130, 230),
+    "BID": (90, 200, 255),
+    "CLAIM": (120, 255, 120),
+    "ACK": (120, 200, 120),
+    "RELEASE": (255, 90, 90),
+    "TARGET_LOGGED": (120, 255, 120),
+}
 
 BG = (18, 20, 26)
 MAP_BG = (26, 30, 38)
@@ -148,7 +162,8 @@ def draw_legend(surf: pygame.Surface, font: pygame.font.Font, topleft: tuple[int
     rows_mode = list(PHASE_MODES)
     rows_target = list(PHASE_TARGET_STATES)
     extras = ["sensor footprint r_eff", "restricted zone (+margin dashed)", "boundary (+margin dashed)",
-              "ground truth (G)", "planned route", "home", "safety warning"]  # fmt: skip
+              "ground truth (G)", "planned route", "home", "safety warning", "comm range (selected)",
+              "message flash (M): BID / CLAIM / other"]  # fmt: skip
     w = 270
     h = 26 + 18 * (len(rows_mode) + len(rows_target) + len(extras)) + 12
     x0, y0 = topleft
@@ -189,3 +204,10 @@ def draw_legend(surf: pygame.Surface, font: pygame.font.Font, topleft: tuple[int
     y += 18
     pygame.draw.circle(surf, WARN, (x0 + 18, y + 8), 7, 2)
     surf.blit(font.render(extras[6], True, TEXT), (x0 + 40, y))
+    y += 18
+    dashed_line(surf, MUTED, (x0 + 6, y + 8), (x0 + 30, y + 8), 1, 4)
+    surf.blit(font.render(extras[7], True, TEXT), (x0 + 40, y))
+    y += 18
+    for i, m in enumerate(("BID", "CLAIM", "HEARTBEAT")):
+        pygame.draw.line(surf, MSG_COLOURS[m], (x0 + 6 + i * 9, y + 13), (x0 + 12 + i * 9, y + 3), 2)
+    surf.blit(font.render(extras[8], True, TEXT), (x0 + 40, y))

@@ -1,0 +1,52 @@
+# Phase 3+: no patrol passes near GT-1. At t = 20 s an external cue ("possible
+# target here") arrives with GT-1's coordinates. Coordinates are not evidence:
+# the cue record stays confirmation=PENDING, and is allocated from DETECTED as a
+# verify-and-inspect task (PLAN.md 7.9). Phase 4: the owner flies there and
+# confirms it with its own sensor (or cancels with cue_not_confirmed).
+
+sim:
+  duration: 120
+  seed: 42
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-1
+      polygon: [[800, 600], [1100, 600], [1100, 1000], [800, 1000]]
+
+drones:
+  - id: D1
+    pos: [200, 300]
+    alt: 60
+    battery_pct: 0.85
+    home: [100, 100, 0]
+    patrol: [[200, 300, 60], [600, 300, 60], [600, 500, 60], [200, 500, 60]]
+  - id: D2
+    pos: [1500, 300]
+    alt: 60
+    battery_pct: 0.80
+    home: [100, 100, 0]
+    patrol: [[1500, 300, 60], [1800, 300, 60], [1800, 500, 60], [1500, 500, 60]]   # never near GT-1
+  - id: D3
+    pos: [900, 1600]
+    alt: 60
+    battery_pct: 0.80
+    home: [100, 100, 0]
+    patrol: [[900, 1600, 60], [1200, 1600, 60], [1200, 1800, 60], [900, 1800, 60]]
+  - id: D4
+    pos: [1700, 1700]
+    alt: 60
+    battery_pct: 0.95
+    home: [100, 100, 0]
+    patrol: [[1700, 1700, 60], [1850, 1700, 60], [1850, 1850, 60], [1700, 1850, 60]]
+
+targets:
+  - id: GT-1
+    pos: [1450, 1100]
+    alt: 0
+    appear_at: 0
+
+scenario_events:
+  - {t: 20, type: external_cue, pos: [1450, 1100]}

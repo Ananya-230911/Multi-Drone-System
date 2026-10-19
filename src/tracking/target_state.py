@@ -80,6 +80,10 @@ class TargetRecord:
     terminal_at: float | None = None
     cancel_reason: str | None = None
     history: list[TransitionEvent] = field(default_factory=list)
+    relayed: bool = False  # first learned from a peer, not from this agent's own sensor
+    # Observations that met the confirmation criteria: (t, confidence, observer, obs_id). Shared with peers
+    # so they can check the criteria themselves (7.1: a peer report confirms only if its evidence qualifies).
+    evidence: list[tuple[float, float, str, str]] = field(default_factory=list)
 
     @property
     def terminal(self) -> bool:

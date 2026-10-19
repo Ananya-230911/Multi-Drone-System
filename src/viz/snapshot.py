@@ -43,6 +43,10 @@ class Snapshot:
     fence: FenceView | None = None
     ground_truth: tuple[GroundTruthView, ...] = ()
     geofence_violations: int = 0
+    messages: tuple[Any, ...] = ()  # recent comms.network.MessageRecord
+    network_stats: dict[str, int] | None = None
+    separation_violations: int = 0
+    comm_range: float = 0.0
 
     def drone(self, drone_id: str) -> DroneView | None:
         return next((d for d in self.drones if d.id == drone_id), None)

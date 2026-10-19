@@ -1,6 +1,5 @@
 # Default scenario: 4 drones patrol, 1 ground-truth target (PLAN.md section 12).
-# Phase 2 uses everything except network, heartbeat, allocation, reacquire, inspection
-# and safety (separation); those are validated now and used by later phases.
+# Phase 3 uses every section except `reacquire` (Phase 4); it is validated now.
 
 sim:
   dt: 0.1

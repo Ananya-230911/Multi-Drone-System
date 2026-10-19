@@ -15,6 +15,7 @@ from src.viz import legend as L
 from src.viz.snapshot import Snapshot
 
 TRAIL_LEN = 300  # points kept per drone
+FLASH_SECONDS = 0.8  # how long a delivered message stays drawn as a line
 TRAIL_EVERY = 5  # keep one trail point every N ticks
 HATCH_STEP = 10  # px between zone hatch lines
 
@@ -27,6 +28,9 @@ class UiState:
     show_legend: bool = True
     show_ground_truth: bool = True
     targets_hidden: bool = False
+    show_messages: bool = True
+    feed: str = "events"  # "events" | "messages"
+    msg_filter: int = 0
 
 
 class MapRenderer:
@@ -95,6 +99,12 @@ class MapRenderer:
                     txt = fonts["small"].render(g.id + ("" if g.visible else " (hidden)"), True, L.GT if g.visible else L.MUTED)
                     surf.blit(txt, (gx - txt.get_width() - 10, gy + 6))  # left of the marker; drone/target labels go right
         self._draw_targets(surf, snap, fonts)
+        if ui.show_messages:
+            self._draw_flashes(surf, snap)
+        sel = snap.drone(ui.selected) if ui.selected else None
+        if sel is not None and snap.comm_range > 0 and sel.mode != "FAILED":
+            cx, cy = self.to_screen(sel.x, sel.y)
+            self._dashed_circle(surf, L.MUTED, (cx, cy), snap.comm_range * self.scale)
         for d in snap.drones:
             sx, sy = self.to_screen(d.x, d.y)
             L.draw_drone_icon(surf, sx, sy, d.heading, d.mode, 8)
@@ -103,7 +113,7 @@ class MapRenderer:
             if d.mode == "SAFETY_HOLD" or d.safety_reason:
                 pygame.draw.circle(surf, L.WARN, (int(sx), int(sy)), 20, 2)
                 surf.blit(fonts["small"].render(d.safety_reason or "SAFETY", True, L.WARN), (sx + 12, sy + 10))
-            label = f"{d.id} {L.mode_label(d.mode)} {d.alt:.0f}m"
+            label = f"{d.id} {L.mode_label(d.mode)} {d.alt:.0f}m" + (f" owner {d.current_task}" if d.current_task else "")
             surf.blit(fonts["small"].render(label, True, L.TEXT), (sx + 12, sy - 18))
             if d.battery_pct < d.reserve_pct:
                 surf.blit(fonts["small"].render("LOW BATT", True, L.WARN), (sx + 12, sy - 4))
@@ -165,6 +175,30 @@ class MapRenderer:
             col = L.target_colour(tv.state)
             surf.blit(fonts["small"].render(f"{tid} {L.target_label(tv.state)}", True, col), (x + 10, y + 6))  # below; drone labels sit above
 
+    def _draw_flashes(self, surf: pygame.Surface, snap: Snapshot) -> None:
+        """A fading line from sender to recipient for each message delivered in the last FLASH_SECONDS."""
+        pos = {d.id: self.to_screen(d.x, d.y) for d in snap.drones}
+        layer = pygame.Surface(self.rect.size, pygame.SRCALPHA)
+        for m in snap.messages:
+            age = snap.t - m.t
+            if m.status != "DELIVERED" or age > FLASH_SECONDS or m.sender not in pos or m.recipient not in pos:
+                continue
+            alpha = int(200 * (1 - age / FLASH_SECONDS)) + 30
+            a = (pos[m.sender][0] - self.rect.x, pos[m.sender][1] - self.rect.y)
+            b = (pos[m.recipient][0] - self.rect.x, pos[m.recipient][1] - self.rect.y)
+            width = 1 if m.type == "HEARTBEAT" else 2
+            pygame.draw.line(layer, (*L.MSG_COLOURS.get(m.type, L.TEXT), alpha), a, b, width)
+        surf.blit(layer, self.rect.topleft)
+
+    @staticmethod
+    def _dashed_circle(surf: pygame.Surface, col, centre, radius: float, segments: int = 72) -> None:
+        import math
+
+        for k in range(0, segments, 2):
+            a0, a1 = 2 * math.pi * k / segments, 2 * math.pi * (k + 1) / segments
+            pygame.draw.line(surf, col, (centre[0] + radius * math.cos(a0), centre[1] + radius * math.sin(a0)),
+                             (centre[0] + radius * math.cos(a1), centre[1] + radius * math.sin(a1)), 1)  # fmt: skip
+
     def _draw_grid(self, surf: pygame.Surface, snap: Snapshot) -> None:
         step = 250.0
         w, h = snap.map_size
@@ -183,7 +217,8 @@ class MapRenderer:
         status = "FINISHED" if snap.finished else ("PAUSED" if ui.paused else "RUNNING")
         text = (
             f"t = {snap.t:7.1f} / {snap.duration:.0f} s   speed {ui.speed:g}x   {status}"
-            f"   scenario: {snap.scenario}   seed {snap.seed}   geofence violations: {snap.geofence_violations}"
+            f"   {snap.scenario}  seed {snap.seed}   geofence viol {snap.geofence_violations}"
+            f"   separation viol {snap.separation_violations}"
         )
-        col = L.WARN if ui.paused or snap.geofence_violations else L.TEXT
+        col = L.WARN if ui.paused or snap.geofence_violations or snap.separation_violations else L.TEXT
         surf.blit(fonts["normal"].render(text, True, col), (bar.x + 10, bar.y + 8))

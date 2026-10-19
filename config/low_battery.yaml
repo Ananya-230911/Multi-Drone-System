@@ -1,0 +1,50 @@
+# Phase 3+: a cue arrives 120 m from D1, the nearest drone. D1 can fly there but
+# cannot afford the round trip (go + inspect + fly home) above its 20 % reserve,
+# so it reports feasible=false (insufficient_energy) and another drone wins.
+
+sim:
+  duration: 60
+  seed: 42
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-1
+      polygon: [[800, 600], [1100, 600], [1100, 1000], [800, 1000]]
+
+drones:
+  - id: D1
+    pos: [1300, 1300]
+    alt: 60
+    battery_pct: 0.29           # enough to keep patrolling for now, not for the round trip
+    home: [100, 100, 0]
+    patrol: [[1300, 1300, 60], [1450, 1300, 60], [1450, 1450, 60], [1300, 1450, 60]]
+  - id: D2
+    pos: [1700, 1600]
+    alt: 60
+    battery_pct: 0.90
+    home: [1800, 1800, 0]
+    patrol: [[1700, 1600, 60], [1850, 1600, 60], [1850, 1750, 60], [1700, 1750, 60]]
+  - id: D3
+    pos: [300, 1600]
+    alt: 60
+    battery_pct: 0.90
+    home: [100, 100, 0]
+    patrol: [[300, 1600, 60], [500, 1600, 60], [500, 1800, 60], [300, 1800, 60]]
+  - id: D4
+    pos: [1600, 300]
+    alt: 60
+    battery_pct: 0.90
+    home: [100, 100, 0]
+    patrol: [[1600, 300, 60], [1800, 300, 60], [1800, 500, 60], [1600, 500, 60]]
+
+targets:
+  - id: GT-1
+    pos: [1560, 1380]
+    alt: 0
+    appear_at: 0
+
+scenario_events:
+  - {t: 10, type: external_cue, pos: [1560, 1380]}

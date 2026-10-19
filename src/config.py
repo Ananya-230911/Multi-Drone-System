@@ -18,11 +18,12 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 import yaml
 
 # Sections the current build actually uses. Everything else is validated and ignored.
-IMPLEMENTED_PHASE = 2
+IMPLEMENTED_PHASE = 3
 SECTIONS_USED = {
     "sim", "navigation", "drone_defaults", "drones", "scenario_events",
     "geofence", "confirmation", "association", "observation", "confidence", "track", "targets",
-    "inspection",  # candidate_count, for the CONFIRM_HOLD point when the spot above the target is restricted
+    "inspection",  # hold / inspection points and the bid's E_insp
+    "network", "heartbeat", "allocation", "safety",
 }  # fmt: skip
 
 
@@ -376,7 +377,7 @@ class TargetConfig:
 SCENARIO_EVENT_FIELDS: dict[str, dict[str, type]] = {
     "fail_drone": {"drone": str},
     "set_battery": {"drone": str, "battery_pct": float},
-    "external_cue": {"pos": list},
+    "external_cue": {"pos": list},  # coordinates sent to every live drone; never evidence
     "place_target": {"pos": list},
     "hide_target": {},  # optional "target": ground-truth id; default all
     "show_target": {},

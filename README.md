@@ -7,7 +7,7 @@ limits, track the target and log the inspection. The full design is in [`PLAN.md
 **Simulation only.** Nothing in this project connects to or commands a real drone or flight
 controller.
 
-**Current status: Phase 2 of 5 (target lifecycle, sensor simulation, geofencing, route safety).**
+**Current status: Phase 3 of 5 (communication, decentralized auction, consensus, task ownership).**
 See the phase reports below.
 
 > **About "confidence":** every confidence value in this project is a *simulated score* used to
@@ -46,8 +46,9 @@ python -m src.main --config config/default.yaml --headless
 ```
 
 Each run writes `output/<run_id>/events.jsonl` (one JSON event per line) and
-`output/<run_id>/summary.json` (final drone states, each drone's target records, geofence
-violations, false confirmations, and the SHA-256 of the event log).
+`output/<run_id>/summary.json` (final drone states, each drone's target records, geofence and
+separation violations, false confirmations, message counts, each allocation's owner versus the
+centralized baseline, and the SHA-256 of the event log).
 
 ### Scenarios
 
@@ -57,7 +58,10 @@ violations, false confirmations, and the SHA-256 of the event log).
 | `config/geofence_detour.yaml` | a long restricted wall; D1 confirms a target in the east, then its route home goes around the wall |
 | `config/target_in_restricted.yaml` | target inside RZ-1; D1 sees it from the zone edge but may not overfly it, so the record is rejected |
 | `config/false_observation.yaml` | no real target, only spurious observations; nothing may ever be confirmed |
-| `config/duplicate_reports.yaml` | three drones fly over GT-1 within seconds; each keeps one local record (merged across agents in Phase 3) |
+| `config/duplicate_reports.yaml` | three drones reach GT-1 on the same tick and each creates its own record; MERGE messages bring every agent to `T-D1-001` |
+| `config/external_cue.yaml` | no patrol sees GT-1; a cue with its coordinates arrives and is allocated while still unconfirmed |
+| `config/low_battery.yaml` | the drone nearest a cue cannot afford the round trip (`insufficient_energy`), so another wins |
+| `config/limited_comms.yaml` | 600 m radio range, drones in a line; D4 never hears D1, yet all agree through relaying |
 
 ### Dashboard controls
 
@@ -69,9 +73,12 @@ violations, false confirmations, and the SHA-256 of the event log).
 | `1`–`4` | select a drone |
 | `F` | fail the selected drone |
 | Left click on map | place a **ground-truth** target (drones still have to detect it) |
-| `Shift` + click | external cue (logged now, applied from Phase 3) |
+| `Shift` + click | send an **external cue** (coordinates only; never counts as evidence) |
 | `H` | hide / show all ground-truth targets |
 | `G` | show / hide ground-truth markers |
+| `M` | show / hide message flash lines |
+| `TAB` | switch the panel feed between events and the message log |
+| `T` | cycle the message-log filter (all, HEARTBEAT, BID, CLAIM, ..., dropped only) |
 | `L` | show / hide the legend |
 | `Esc` | quit |
 
@@ -106,14 +113,20 @@ src/tracking/tracker.py     per-agent records: association, merge, confirmation,
 src/safety/geofence.py      boundary, zones, altitude limits, margin, edge rule
 src/safety/route_validator.py point / segment / route validation with reason codes
 src/safety/planner.py       visibility graph + A*, 3D profile, inspection points
-src/safety/monitor.py       runtime checks: next step, battery reserve, landing
+src/safety/monitor.py       runtime checks: next step, separation, battery reserve, landing
+src/comms/messages.py       message types and per-drone outbox
+src/comms/network.py        simulated radio: range, latency, loss, partitions
+src/drone/coordination.py   inbox handling, peer table, sharing, auction actions
+src/allocation/cost.py      bid cost and feasibility with breakdown
+src/allocation/auction.py   decentralized auction + consensus
+src/allocation/baseline.py  centralized optimum (evaluation only)
 src/logging_/event_log.py   JSON Lines event log (canonical, hashable)
 src/viz/                    snapshot, map renderer, side panel, legend
 tests/unit/                 algorithm tests (no world, no pygame)
 tests/sim/                  headless scenario tests per phase
 ```
 
-Empty packages (`allocation/`, `comms/`) are placeholders for Phase 3.
+`src/logging_/target_log.py` and `src/evaluate.py` arrive in Phases 4 and 5.
 
 ---
 
@@ -281,3 +294,109 @@ target; and determinism with sensor randomness.
    spot creates a new record (`target_in_restricted` shows `T-D1-001`, then `T-D1-002`). The
    ignore window in 7.4 applies only after COMPLETED, as the plan specifies.
 9. `merge_remote` raises `NotImplementedError` until Phase 3 adds messages.
+
+---
+
+## Phase 3 report
+
+### What was built
+- **Simulated radio** (`comms/network.py`): every message is a broadcast. Delivery depends on
+  range (the smaller of the network's and the sender's range), per-recipient packet loss and
+  uniform latency, so messages can arrive out of order. Scheduled partitions are supported, and
+  FAILED drones neither send nor receive. Every send, delivery and drop is logged with a reason.
+- **Messages** (`comms/messages.py`): the ten types in section 10.1, each identified by
+  `(sender, seq)`. Receivers drop duplicates and messages older than `max_message_age`.
+- **Heartbeats and peer table**: each drone broadcasts its position, velocity, battery, mode and
+  task every second. A peer counts as alive if it was heard within `miss_limit` periods.
+- **Sharing** (`drone/coordination.py`): `TARGET_DETECTED` when a record is created, `OBSERVATION`
+  (at most `obs_share_hz` per target), `TARGET_STATE` with the confirming evidence, and `MERGE`.
+  A drone re-broadcasts what it learns once, so information travels several hops when the radio
+  range is short.
+- **Peer reports in the tracker**: a peer's record is copied under the peer's ID. The copy is
+  CONFIRMED only if the shared evidence meets the 7.5 criteria when this agent checks it itself.
+  A duplicate merges into the smallest ID, and a peer's MERGE renames or merges local records.
+- **Cost** (`allocation/cost.py`): exactly as in 8.2, with every term in the breakdown. Drones that
+  cannot compete send `feasible=false` with a reason: `mode_RETURNING`, `parked_at_home`, `busy`,
+  `excluded_this_epoch`, `no_inspection_point`, `no_route`, `no_route_home` or
+  `insufficient_energy`. The geofence enters only through feasibility and route length.
+- **Auction and consensus** (`allocation/auction.py`): the max-consensus rules of 8.3:
+  - compare rule: higher epoch, then higher bid, then lower ID;
+  - any change is re-broadcast immediately (this is the relay);
+  - commit after `consensus_rounds` stable rounds and a BID, CLAIM or ACK from every alive peer;
+  - after `allocation_timeout`, commit the current winner, or cancel with `no_feasible_bidders`;
+  - the winner sends CLAIM and the others ACK; a committed agent repeats its CLAIM or ACK to a
+    peer that is still bidding;
+  - conflicting CLAIMs resolve by the compare rule, and the loser sends `RELEASE(conflict_lost)`;
+  - auction tables of merged duplicate records are combined.
+- **Lifecycle**: every agent applies row 5 (CONFIRMED → ALLOCATED), or row 4 for a cue (still
+  DETECTED and PENDING), when it commits.
+- **External cues**: every live drone receives the coordinates as record `T-EXT-<n>`. The cue is
+  never evidence, and its confirmation timeout waits until a drone is on site (Phase 4).
+- **Separation**: the monitor predicts each peer's position from its heartbeat over
+  `separation_horizon`. A drone without a task yields to one with a task; otherwise the higher ID
+  yields. Yielding means holding position until the path is clear (`SEPARATION_YIELD`). The
+  world separately measures true separation, for evaluation only.
+- **Baseline** (`allocation/baseline.py`): after the run, the same cost and planner are applied
+  to the true drone states at the moment allocation started; `World.baseline_results()` reports
+  agreement and match. It never runs during the simulation.
+- **Dashboard**:
+  - a target panel showing the owner's (or lowest ID's) view with an "agents agreeing: n/m" count,
+    highlighted in red when the drones disagree;
+  - a bid table (t_go, E_need, battery after, cost, winner, or the reason a drone can't bid);
+  - a message log with a type filter and send/delivery/drop counters;
+  - fading message lines between drones, a dashed radio-range circle for the selected drone, and
+    owner labels;
+  - a separation-violation counter.
+
+### Acceptance check
+| Criterion | Result |
+|---|---|
+| `default`: every live agent commits the same owner, matching the baseline | All four commit **D2** within 2 s of the first bid (88.2 → 90.2 s, 25 auction messages). The baseline also picks D2. D3 reports `mode_RETURNING`. |
+| `low_battery`: the nearest drone reports `feasible=false` and another wins | D1, the nearest, reports `insufficient_energy`; all four commit **D2**, matching the baseline |
+| `limited_comms`: agreement through relay | All four commit **D1**. D4 received **0** messages from D1 and learned the target from D3. |
+| `duplicate_reports`: all agents converge on one target ID | D1, D2 and D3 create `T-D1-001`, `T-D2-001` and `T-D3-001` on the same tick. After the MERGEs every agent holds only `T-D1-001`, and all agree on owner D2. |
+| `external_cue`: the cue is allocated while `confirmation=PENDING` | All four hold `T-EXT-001` as ALLOCATED and PENDING, via row 4. It is never CONFIRMED, and owner D3 matches the baseline. |
+| The owner is announced but does not fly to the target | No drone enters ENROUTE or INSPECTING; the owner keeps patrolling with `current_task` set |
+
+Across all scenarios there are 0 geofence violations and 0 true separation violations, and every
+allocation matches the baseline.
+
+**Tests:** 316 passed.
+- New unit tests: `test_cost`, `test_consensus` (random bids with random latency, reordering and
+  20 % loss over 25 seeds; line topology relay; stale epochs; conflicting claims; merge),
+  `test_network`, `test_separation`, and new peer-message tests in `test_tracker`.
+- New simulation tests: `test_phase3_allocation` and `test_decentralization`. The latter checks
+  that no agent holds a reference to another agent, the world, ground truth, the network, the
+  sensors or the scenario; that peer tables and peer bids come only from delivered messages;
+  that with the radio off an agent knows nothing about the others; and that duplicate and stale
+  messages are dropped.
+- Phase 2 tests that check purely local tracking now run with the radio off (1 m range). With the
+  radio off, a drone that hears no peers allocates the target to itself.
+
+### Phase 3 decisions to review
+1. **Records from peers keep their original `source`** (`sensor` or `external_cue`) and get a
+   separate `relayed=True` flag. The plan says "source=relayed", but replacing the source would
+   lose the fact that a record is an external cue, and the cue's allocation path (row 4) depends
+   on it.
+2. **Confirmation evidence is shared.** OBSERVATION sharing is limited to 1 Hz, so peers might
+   never collect 3 observations within the 5 s window. So TARGET_STATE (and each BID) carries the
+   observations that met the criteria, and each receiver re-checks the 7.5 criteria on that
+   evidence itself. It never adopts "CONFIRMED" on trust.
+3. **Inspection point for bidding**: `inspection_standoff` (15.8 m at a 60 m sensor radius) is
+   the distance at which the noise-free confidence model gives `inspection.min_confidence`. A
+   point at the very edge of `r_eff` would have a confidence of about 0, so the inspection could
+   never succeed. A larger `r_eff` still gives a shorter route, as 8.2 intends.
+4. **Committed agents repeat CLAIM/ACK** to peers that are still bidding (at most once per round),
+   so a peer that started late or lost messages can still collect a reply from every alive peer
+   without waiting for the 10 s timeout.
+5. **Separation counts in 3D** (`min_separation` 25 m + buffer 10 m). Grounded peers (parked or
+   landed) are ignored. A FAILED drone stops sending heartbeats and drops out of the prediction
+   after `miss_limit` periods. A drone hovering in its place could then be passed too closely;
+   the world's true-separation measurement would report that. `duplicate_reports` now stacks its
+   drones 36 m apart vertically, so they can all pass over GT-1 together without yielding.
+6. **Thin feasibility margins are allowed.** In `default`, a Shift+click cue near D3 gives D3
+   `batt_after` = 20.06 Wh, just above the 20 Wh reserve, so D3 wins. Bids are computed once per
+   epoch while drones keep patrolling (8.2). If the owner later reaches its reserve, Phase 4's
+   `RELEASE(battery_reserve)` and reallocation cover it.
+7. **Speed:** the dashboard snapshot is built only when something reads it. A 400 s default run
+   takes about 3 s headless here.

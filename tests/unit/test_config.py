@@ -28,7 +28,8 @@ def test_default_config_loads_with_section_12_values():
 
 def test_later_phase_sections_reported_as_info():
     cfg = load_config(DEFAULT)
-    assert any("'allocation'" in m for m in cfg.info)
+    assert any("'reacquire'" in m for m in cfg.info)  # used from Phase 4
+    assert not any("'allocation'" in m for m in cfg.info)
     assert not any("'drones'" in m for m in cfg.info)
 
 

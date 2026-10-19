@@ -1,12 +1,18 @@
-# Phase 2+: three drones fly over GT-1 within a few seconds of each other, so each
-# creates its own record (T-D1-001, T-D2-001, T-D3-001) before hearing the others.
+# Phase 2+: three drones reach sensor range of GT-1 on the same tick (same sensor
+# radius, same distance, same speed), so each creates its own record (T-D1-001,
+# T-D2-001, T-D3-001) before any message can arrive.
 # Phase 2 (no messages): each agent holds exactly one record for the target.
-# Phase 3: all agents converge on the smallest ID through MERGE.
-# Drones fly at different altitudes so their paths cross without sharing airspace.
+# Phase 3: duplicates are merged and every agent converges on the smallest ID, T-D1-001.
+# Drones are stacked 36 m apart vertically (above min_separation + buffer = 35 m), so
+# their paths can cross over GT-1 without a separation conflict.
 
 sim:
   duration: 200
   seed: 42
+
+drone_defaults:
+  sensor:
+    radius: 40                     # r_eff = 40 m for every drone flying at 40 m or higher
 
 geofence:
   boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
@@ -19,22 +25,22 @@ geofence:
 drones:
   - id: D1
     pos: [1200, 1400]
-    alt: 50
+    alt: 40
     battery_pct: 0.90
     home: [100, 100, 0]
-    patrol: [[1200, 1400, 50], [1600, 1400, 50], [1600, 1700, 50], [1200, 1700, 50]]
+    patrol: [[1200, 1400, 40], [1600, 1400, 40], [1600, 1700, 40], [1200, 1700, 40]]
   - id: D2
     pos: [1400, 1200]
-    alt: 60
+    alt: 76
     battery_pct: 0.90
     home: [100, 100, 0]
-    patrol: [[1400, 1200, 60], [1400, 1600, 60], [1750, 1600, 60], [1750, 1200, 60]]
+    patrol: [[1400, 1200, 76], [1400, 1600, 76], [1750, 1600, 76], [1750, 1200, 76]]
   - id: D3
-    pos: [1600, 1600]
-    alt: 70
+    pos: [1541.42, 1541.42]        # 200 m from GT-1 on the diagonal, like D1 and D2 on their axes
+    alt: 112
     battery_pct: 0.90
     home: [100, 100, 0]
-    patrol: [[1600, 1600, 70], [1200, 1200, 70], [1200, 1100, 70], [1700, 1100, 70]]
+    patrol: [[1541.42, 1541.42, 112], [1200, 1200, 112], [1200, 1100, 112], [1700, 1100, 112]]
   - id: D4
     pos: [200, 300]
     alt: 60

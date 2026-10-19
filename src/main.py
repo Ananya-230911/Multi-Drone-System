@@ -57,6 +57,10 @@ def write_outputs(world: World, out_root: Path, run_id: str) -> Path:
         "event_log_sha256": world.log.digest(),
         "geofence_violations": len(world.geofence_violations),
         "false_confirmations": world.false_confirmations(),
+        "separation_violations": [list(v) for v in world.separation_violations],
+        "messages": dict(world.network.stats),
+        "messages_by_type": dict(sorted(world.network.sent_by_type.items())),
+        "allocations": [{k: v for k, v in r.items() if k != "baseline_bids"} for r in world.baseline_results()],
         "targets": {
             d.id: [{"id": tv.id, "state": tv.state, "confirmation": tv.confirmation, "est_pos": [round(v, 2) for v in tv.est_pos],
                     "observations": tv.n_obs} for tv in d.targets]
@@ -132,6 +136,12 @@ def run_gui(world_factory) -> World:
                     ui.show_legend = not ui.show_legend
                 elif ev.key == pygame.K_g:
                     ui.show_ground_truth = not ui.show_ground_truth
+                elif ev.key == pygame.K_m:
+                    ui.show_messages = not ui.show_messages
+                elif ev.key == pygame.K_TAB:
+                    ui.feed = "messages" if ui.feed == "events" else "events"
+                elif ev.key == pygame.K_t:
+                    ui.msg_filter += 1
                 elif ev.key == pygame.K_h:
                     # Hide / show every ground-truth target (forces track loss). A scenario event, logged.
                     ui.targets_hidden = not ui.targets_hidden
@@ -140,7 +150,7 @@ def run_gui(world_factory) -> World:
                 wx, wy = renderer.to_world(*ev.pos)
                 pos = [round(wx, 1), round(wy, 1)]
                 if pygame.key.get_mods() & pygame.KMOD_SHIFT:
-                    world.scenario.inject(world.t, "external_cue", {"pos": pos})  # applied from Phase 3
+                    world.scenario.inject(world.t, "external_cue", {"pos": pos})  # coordinates only, never evidence
                 else:
                     # A ground-truth target: the drones still have to detect it with their sensors.
                     world.scenario.inject(world.t, "place_target", {"pos": pos})
