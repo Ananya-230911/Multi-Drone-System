@@ -19,6 +19,11 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+The dashboard uses `pygame-ce`, a maintained fork of pygame that is imported the same way
+(`import pygame`). The original `pygame` package has no prebuilt wheels for Python 3.14 and fails
+to install there. If you already have `pygame` installed, uninstall it first
+(`pip uninstall pygame`), because the two packages conflict.
+
 ## Run
 
 ```bash

@@ -1,6 +1,6 @@
 numpy>=1.26
 shapely>=2.0
-pygame>=2.5
+pygame-ce>=2.5      # drop-in replacement for pygame (same "import pygame"); has wheels for Python 3.14
 pyyaml>=6.0
 pytest>=8.0
 matplotlib>=3.8
