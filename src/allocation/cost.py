@@ -13,7 +13,7 @@
 
 The geofence is never a cost term: it enters only through route feasibility and
 route length. The inspection point sits `inspection_standoff` from the target,
-the distance at which the (noise-free) confidence model reaches
+where the (noise-free) confidence model is comfortably above
 `inspection.min_confidence`, so a drone with a larger effective sensor radius
 needs a shorter route.
 """
@@ -65,10 +65,17 @@ class Bid:
 
 
 def inspection_standoff(r_eff: float, conf: ConfidenceConfig, insp: InspectionConfig) -> float:
-    """Distance from the target at which base*(1-d/r_eff)^falloff equals inspection.min_confidence."""
+    """Distance from the target at which the noise-free confidence base*(1-d/r_eff)^falloff is
+    halfway between inspection.min_confidence and base.
+
+    Aiming at the threshold itself would leave about half of the noisy observations below it, so
+    the inspection timer would barely advance; the midpoint keeps a margin of
+    (base - min_confidence) / 2 above the threshold.
+    """
     if insp.min_confidence >= conf.base or r_eff <= 0:
         return 0.0
-    return r_eff * (1.0 - (insp.min_confidence / conf.base) ** (1.0 / conf.falloff_exp))
+    aim = (insp.min_confidence + conf.base) / 2.0
+    return r_eff * (1.0 - (aim / conf.base) ** (1.0 / conf.falloff_exp))
 
 
 def better(bid_a: float | None, id_a: str | None, bid_b: float | None, id_b: str | None) -> bool:

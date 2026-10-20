@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from src.config import Config, ConfigError, load_config
+from src.logging_.target_log import write_csv
 from src.sim.world import World
 
 SPEEDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
@@ -48,6 +49,8 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
 def write_outputs(world: World, out_root: Path, run_id: str) -> Path:
     out = out_root / run_id
     world.log.write(out / "events.jsonl")
+    rows = world.target_log_rows()
+    write_csv(rows, out / "target_log.csv")
     summary = {
         "scenario": world.cfg.name,
         "seed": world.cfg.sim.seed,
@@ -61,6 +64,9 @@ def write_outputs(world: World, out_root: Path, run_id: str) -> Path:
         "messages": dict(world.network.stats),
         "messages_by_type": dict(sorted(world.network.sent_by_type.items())),
         "allocations": [{k: v for k, v in r.items() if k != "baseline_bids"} for r in world.baseline_results()],
+        "target_log": [{k: r[k] for k in ("target_id", "final_state", "owner", "logged_at", "cancel_reason",
+                                          "duplicate_inspection")} for r in rows],
+        "neutralized": [e["data"] for e in world.log.of_type("TARGET_NEUTRALIZED")],
         "targets": {
             d.id: [{"id": tv.id, "state": tv.state, "confirmation": tv.confirmation, "est_pos": [round(v, 2) for v in tv.est_pos],
                     "observations": tv.n_obs} for tv in d.targets]

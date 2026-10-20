@@ -1,11 +1,12 @@
 # Phase 3+: no patrol passes near GT-1. At t = 20 s an external cue ("possible
 # target here") arrives with GT-1's coordinates. Coordinates are not evidence:
 # the cue record stays confirmation=PENDING, and is allocated from DETECTED as a
-# verify-and-inspect task (PLAN.md 7.9). Phase 4: the owner flies there and
-# confirms it with its own sensor (or cancels with cue_not_confirmed).
+# verify-and-inspect task (PLAN.md 7.9). The owner flies there, confirms it with its
+# own sensor and logs it. At t = 90 s a second cue points at an empty spot: the owner
+# finds nothing, the cue is CANCELLED (cue_not_confirmed) and never logged.
 
 sim:
-  duration: 120
+  duration: 220
   seed: 42
 
 geofence:
@@ -49,4 +50,5 @@ targets:
     appear_at: 0
 
 scenario_events:
-  - {t: 20, type: external_cue, pos: [1450, 1100]}
+  - {t: 20, type: external_cue, pos: [1450, 1100]}    # real target there (GT-1)
+  - {t: 90, type: external_cue, pos: [1500, 1600]}    # nothing there

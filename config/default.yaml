@@ -1,5 +1,5 @@
 # Default scenario: 4 drones patrol, 1 ground-truth target (PLAN.md section 12).
-# Phase 3 uses every section except `reacquire` (Phase 4); it is validated now.
+# Every section is used (Phase 4). `mission` is an addition to PLAN.md section 12.
 
 sim:
   dt: 0.1
@@ -45,7 +45,7 @@ confirmation:
 
 association:
   radius: 30
-  ignore_after_complete: 60
+  ignore_after_complete: 400      # PLAN.md uses 60; GT-1 stays put here, so 60 s would re-inspect it every lap
 
 observation:
   max_observation_age: 3.0
@@ -88,6 +88,9 @@ safety:
   min_separation: 25
   separation_buffer: 10
   separation_horizon: 3.0
+
+mission:
+  neutralize_on_complete: false   # true: the logged target is marked NEUTRALIZED (simulated engage mission)
 
 drone_defaults:
   max_speed: 15                   # m/s

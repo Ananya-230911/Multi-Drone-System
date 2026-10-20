@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
 FLOAT_DIGITS = 6
 
-# Section 13.1 event types, plus the Phase 1 additions WAYPOINT_REACHED and HOME_REACHED.
+# Section 13.1 event types, plus WAYPOINT_REACHED and HOME_REACHED (Phase 1) and
+# TARGET_NEUTRALIZED (Phase 4, world event when mission.neutralize_on_complete is on).
 EVENT_TYPES = frozenset(
     {
         "SCENARIO_EVENT", "MSG_SENT", "MSG_DELIVERED", "MSG_DROPPED", "OBSERVATION",
@@ -24,7 +26,7 @@ EVENT_TYPES = frozenset(
         "SAFETY_HOLD", "SAFETY_REPLAN", "SAFETY_RETURN", "SAFETY_LAND", "SEPARATION_YIELD",
         "TRACK_FRESHNESS", "TRACK_LOST", "REACQUIRE_START", "REACQUIRE_SUCCESS", "REACQUIRE_TIMEOUT",
         "INSPECTION_PROGRESS", "TARGET_LOGGED", "TASK_COMPLETED", "TASK_CANCELLED", "DRONE_MODE",
-        "DRONE_FAILED", "WAYPOINT_REACHED", "HOME_REACHED",
+        "DRONE_FAILED", "WAYPOINT_REACHED", "HOME_REACHED", "TARGET_NEUTRALIZED",
     }
 )  # fmt: skip
 
@@ -39,10 +41,17 @@ def _clean(value: Any) -> Any:
     return value
 
 
+# Very frequent event types left out of `important` (the dashboard feed). They are still in the log.
+NOISY = frozenset({"MSG_SENT", "MSG_DELIVERED", "MSG_DROPPED", "OBSERVATION", "WAYPOINT_REACHED",
+                   "TRACK_FRESHNESS", "ROUTE_PLANNED", "INSPECTION_PROGRESS"})  # fmt: skip
+IMPORTANT_KEPT = 300
+
+
 class EventLog:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
         self._lines: list[str] = []
+        self.important: deque[dict[str, Any]] = deque(maxlen=IMPORTANT_KEPT)
 
     def append(
         self,
@@ -63,6 +72,8 @@ class EventLog:
         rec["data"] = data or {}
         rec = _clean(rec)
         self.records.append(rec)
+        if etype not in NOISY:
+            self.important.append(rec)
         self._lines.append(json.dumps(rec, sort_keys=True, separators=(",", ":")))
         return rec
 

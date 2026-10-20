@@ -1,7 +1,10 @@
 # Phase 2+: GT-1 sits inside restricted zone RZ-1, 15 m from its raw edge. D1 patrols
 # just outside the zone and can see it from the edge, but nothing may fly over it.
-# Phase 2: the hold point falls back to the zone edge, confidence stays low, and the
-# record is REJECTED -> CANCELLED. (Phase 4: inspected from the edge or cancelled.)
+# The hold point falls back to the zone edge, confidence stays low (about 0.3), and the
+# record is REJECTED -> CANCELLED: it can never be inspected from outside the zone.
+# At t = 20 s a cue points deep inside RZ-1: no drone has a valid inspection point,
+# every bid is infeasible (no_inspection_point) and the task is CANCELLED with
+# no_feasible_bidders.
 
 sim:
   duration: 200
@@ -40,3 +43,6 @@ targets:
     pos: [1085, 800]
     alt: 0
     appear_at: 0
+
+scenario_events:
+  - {t: 20, type: external_cue, pos: [950, 800]}      # deep inside RZ-1

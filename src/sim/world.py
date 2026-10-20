@@ -27,6 +27,7 @@ from src.config import Config, ConfigError
 from src.drone.agent import Drone, SharedContext
 from src.drone.sensor import Sensor
 from src.logging_.event_log import EventLog
+from src.logging_.target_log import LogEntry, merge as merge_logbooks
 from src.safety.geofence import Geofence
 from src.safety.planner import Planner
 from src.safety.route_validator import validate_route
@@ -86,6 +87,7 @@ class World:
             heartbeat=cfg.heartbeat,
             safety=cfg.safety,
             max_message_age=cfg.network.max_message_age,
+            reacquire=cfg.reacquire,
         )
         ordered = sorted(cfg.drones, key=lambda d: d.id)
         self.drones: dict[str, Drone] = {d.id: Drone(d, shared) for d in ordered}
@@ -100,6 +102,7 @@ class World:
         self._close_pairs: set[tuple[str, str]] = set()
         # True drone states when each allocation started, for the centralized baseline (evaluation only).
         self.allocation_starts: dict[tuple[str, int], dict] = {}
+        self._pending_neutralize: list[tuple[str, str, tuple[float, float]]] = []
         self._snapshot: Snapshot | None = None
 
     @property
@@ -163,6 +166,8 @@ class World:
 
     def _drain(self, agent: Drone) -> None:
         for ev in agent.events:
+            if ev["type"] == "TASK_COMPLETED" and self.cfg.mission.neutralize_on_complete:
+                self._pending_neutralize.append((agent.id, ev["target_id"], tuple(ev["data"]["est_pos"])))
             if ev["type"] == "BID_COMPUTED":
                 key = (ev["target_id"], ev["epoch"])
                 if key not in self.allocation_starts:
@@ -170,12 +175,45 @@ class World:
                                                    "drones": [d.export_view() for _, d in sorted(self.drones.items())]}  # fmt: skip
         self.log.extend(agent.events)
         agent.events.clear()
+        while self._pending_neutralize:
+            self._neutralize(*self._pending_neutralize.pop(0))
         msgs = agent.outbox.drain()
         if msgs:
             positions = {i: d.state.pos3 for i, d in self.drones.items()}
             failed = self._failed()
             for m in msgs:
                 self.network.send(m, self.t, positions, failed)
+
+    def _neutralize(self, drone_id: str, target_id: str, est: tuple[float, float]) -> None:
+        """Simulated end of an engage mission: the true target the owner logged stops existing.
+
+        A world-side effect (like the sensor model), never agent knowledge: the nearest visible
+        ground-truth target within association.radius of the logged estimate is removed.
+        """
+        near = [(math.dist(t.pos, est), t) for t in self.ground_truth.visible(self.t)]
+        near = [x for x in near if x[0] <= self.cfg.association.radius]
+        if not near:
+            return
+        err, gt = min(near, key=lambda x: (x[0], x[1].id))
+        gt.neutralized_at = self.t
+        self.log.append(self.t, "TARGET_NEUTRALIZED", "WORLD",
+                        {"ground_truth": gt.id, "by": drone_id, "estimate_error_m": err}, target_id=target_id)  # fmt: skip
+
+    def target_log_rows(self) -> list[dict]:
+        """Merged per-agent logbooks (13.2): one row per target, aliases resolved."""
+        alias_of: dict[str, str] = {}
+        for agent in self.drones.values():
+            alias_of.update(agent.tracker.alias_of)
+        logbooks = {i: list(a.logbook) for i, a in self.drones.items()}
+        views = {i: [LogEntry.from_record(r, i) for r in a.tracker.records.values()] for i, a in self.drones.items()}
+        used: dict[str, int] = {}
+        for ev in self.log.of_type("MSG_SENT"):
+            if "target_id" in ev:
+                tid = ev["target_id"]
+                while tid in alias_of and alias_of[tid] != tid:
+                    tid = alias_of[tid]
+                used[tid] = used.get(tid, 0) + 1
+        return merge_logbooks(logbooks, views, alias_of, used)
 
     def baseline_results(self) -> list[dict]:
         """Decentralized owner vs centralized optimum for every allocation (evaluation only, after the run)."""
@@ -253,9 +291,10 @@ class World:
             ),
             drones=tuple(self.drones[i].export_view() for i in sorted(self.drones)),
             ground_truth=tuple(
-                GroundTruthView(t.id, t.pos, t.visible(self.t), t.appear_at <= self.t) for t in self.ground_truth.targets
+                GroundTruthView(t.id, t.pos, t.visible(self.t), t.appear_at <= self.t, t.neutralized_at is not None)
+                for t in self.ground_truth.targets
             ),
-            recent_events=tuple(self.log.tail(RECENT_EVENTS)),
+            recent_events=tuple(list(self.log.important)[-RECENT_EVENTS:]),
             geofence_violations=len(self.geofence_violations),
             messages=tuple(list(self.network.history)[-RECENT_MESSAGES:]),
             network_stats=dict(self.network.stats),

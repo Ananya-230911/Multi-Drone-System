@@ -1,0 +1,59 @@
+# Demo mission: 4 drones near one target. Each drone shows a different parameter
+# mattering in the decision:
+#   D1  closest, but its battery cannot cover go + engage + return above the 20 % reserve
+#   D2  flying high (110 m): it spots the target first (larger sensor footprint) but must
+#       descend 50 m to the 60 m engagement altitude, which costs time and energy
+#   D3  normal drone, mid distance
+#   D4  farther away, with a small sensor (radius 30 m): it must fly closer to the target
+# The four drones share the target by radio, compute their bids and agree on one drone.
+# That drone flies a validated route around the no-fly zone, locks on for
+# inspection.duration seconds, logs the target, and the simulated target is marked
+# NEUTRALIZED (mission.neutralize_on_complete). Everything is simulated.
+
+sim:
+  duration: 150
+  seed: 7
+
+mission:
+  neutralize_on_complete: true
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: NFZ-1                     # no-fly zone between D3/D4 and the target
+      polygon: [[1100, 700], [1250, 700], [1250, 1300], [1100, 1300]]
+
+drones:
+  - id: D1
+    pos: [850, 1150]
+    alt: 60
+    battery_pct: 0.235
+    home: [600, 1300, 0]
+    patrol: [[850, 1150, 60], [850, 1250, 60], [750, 1250, 60], [750, 1150, 60]]
+  - id: D2
+    pos: [1000, 700]
+    alt: 110
+    battery_pct: 0.80
+    home: [1000, 300, 0]
+    patrol: [[1000, 700, 110], [1060, 1000, 110], [1000, 1300, 110], [940, 1000, 110]]   # passes over the target
+  - id: D3
+    pos: [1450, 1000]
+    alt: 60
+    battery_pct: 0.85
+    home: [1700, 1000, 0]
+    patrol: [[1450, 1000, 60], [1450, 1200, 60], [1550, 1200, 60], [1550, 1000, 60]]
+  - id: D4
+    pos: [1500, 600]
+    alt: 60
+    battery_pct: 0.95
+    home: [1700, 400, 0]
+    patrol: [[1500, 600, 60], [1650, 600, 60], [1650, 450, 60], [1500, 450, 60]]
+    sensor: {radius: 30}
+
+targets:
+  - id: GT-1
+    pos: [1000, 1000]
+    alt: 0
+    appear_at: 0

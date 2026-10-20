@@ -7,8 +7,31 @@ limits, track the target and log the inspection. The full design is in [`PLAN.md
 **Simulation only.** Nothing in this project connects to or commands a real drone or flight
 controller.
 
-**Current status: Phase 3 of 5 (communication, decentralized auction, consensus, task ownership).**
+**Current status: Phase 4 of 5 (navigation, tracking, inspection / engagement, logging, recovery).**
 See the phase reports below.
+
+## Demo: four drones decide who takes the target
+
+```bash
+python -m src.main --config config/mission.yaml
+```
+
+Four drones operate near one target (`GT-1`). Nobody is in charge: each drone works out how
+suitable it is, they exchange bids by radio, and they agree on one drone. That drone flies a
+safe route, locks on, logs the target, and the simulated target is marked **NEUTRALIZED**.
+Each drone shows a different parameter mattering:
+
+| Drone | Situation | Result |
+|---|---|---|
+| D1 | closest, but low battery | cannot go + engage + return above the 20 % reserve, so `insufficient_energy` |
+| D2 | flying high (110 m), right above the target | spots it first; must descend 50 m, still the cheapest, so **wins** |
+| D3 | normal drone, mid distance, no-fly zone in between | 55 s away by the planned detour |
+| D4 | farther away, small sensor (30 m) | must fly closer to the target; 60 s away |
+
+Watch the BIDS table and the "WHY D2" lines in the panel, the red lock line and `LOCK n/10 s`
+timer, and the green "MISSION COMPLETE" banner. To see the drones re-decide ("swap"), press `2`
+then `F` while D2 is on its way: the others notice it is gone, reopen the task and send another
+drone. Everything is simulated: "neutralized" is an event in the simulation, not a weapon model.
 
 > **About "confidence":** every confidence value in this project is a *simulated score* used to
 > exercise the decision logic (PLAN.md 7.3). It does not represent the detection accuracy of any
@@ -45,7 +68,8 @@ python -m src.main --config config/default.yaml --headless
 #   --run-id NAME   run directory name (default: <scenario>_seed<seed>_<timestamp>)
 ```
 
-Each run writes `output/<run_id>/events.jsonl` (one JSON event per line) and
+Each run writes `output/<run_id>/events.jsonl` (one JSON event per line),
+`output/<run_id>/target_log.csv` (the mission log: one row per target) and
 `output/<run_id>/summary.json` (final drone states, each drone's target records, geofence and
 separation violations, false confirmations, message counts, each allocation's owner versus the
 centralized baseline, and the SHA-256 of the event log).
@@ -62,6 +86,8 @@ centralized baseline, and the SHA-256 of the event log).
 | `config/external_cue.yaml` | no patrol sees GT-1; a cue with its coordinates arrives and is allocated while still unconfirmed |
 | `config/low_battery.yaml` | the drone nearest a cue cannot afford the round trip (`insufficient_energy`), so another wins |
 | `config/limited_comms.yaml` | 600 m radio range, drones in a line; D4 never hears D1, yet all agree through relaying |
+| `config/tracking_loss.yaml` | GT-1 is hidden for 8 s during the inspection: track lost, spiral search, reacquired, timer paused |
+| `config/mission.yaml` | the demo above: four drones, different parameters, one engages, target NEUTRALIZED |
 
 ### Dashboard controls
 
@@ -122,13 +148,15 @@ src/drone/coordination.py   inbox handling, peer table, sharing, auction actions
 src/allocation/cost.py      bid cost and feasibility with breakdown
 src/allocation/auction.py   decentralized auction + consensus
 src/allocation/baseline.py  centralized optimum (evaluation only)
+src/drone/mission.py        the owner's mission: route, lock, inspect, log, reacquire, release
+src/logging_/target_log.py  per-agent logbooks merged into target_log.csv
 src/logging_/event_log.py   JSON Lines event log (canonical, hashable)
 src/viz/                    snapshot, map renderer, side panel, legend
 tests/unit/                 algorithm tests (no world, no pygame)
 tests/sim/                  headless scenario tests per phase
 ```
 
-`src/logging_/target_log.py` and `src/evaluate.py` arrive in Phases 4 and 5.
+`src/evaluate.py` (batch runs, metrics and plots) arrives in Phase 5.
 
 ---
 
@@ -402,3 +430,97 @@ allocation matches the baseline.
    `RELEASE(battery_reserve)` and reallocation cover it.
 7. **Speed:** the dashboard snapshot is built only when something reads it. A 400 s default run
    takes about 3 s headless here.
+
+---
+
+## Phase 4 report
+
+### What was built
+- **The owner's mission** (`drone/mission.py`). After the commit, the winner:
+  - computes the inspection (engagement) point, using the same method as its bid;
+  - flies a validated route there (`ENROUTE`, row 7), every step still checked by the monitor;
+  - locks on when it is in the inspection region with a fresh track (`INSPECTING`, row 9; row 8
+    if it is already in position);
+  - counts lock time only while all the 7.10 conditions hold: CONFIRMED, inside `r_eff`,
+    geofence-valid, FRESH track, confidence ≥ `inspection.min_confidence`;
+  - after `inspection.duration`, writes its logbook entry, broadcasts `TARGET_LOGGED`, goes
+    LOGGED → COMPLETED (rows 14–15), and flies back to the nearest patrol waypoint
+    (`RETURNING` → `PATROL`).
+- **Tracking loss and reacquisition**: when the track goes LOST, the owner goes TRACKING_LOST →
+  REACQUIRING (rows 10–11) and flies a square spiral (`reacquire.leg_step`). Every leg is
+  planned and validated, and legs outside the geofence are skipped. Once the target is seen
+  again it goes back to TRACKING (row 12) and the owner returns to an inspection point of the
+  new estimate. After `reacquire.timeout` it cancels (row 13) or releases for reallocation,
+  depending on `timeout_action`. `timer_on_loss: pause` keeps the seconds already counted.
+- **Release and reallocation (the "swap")**: the owner releases the task when:
+  - its battery reserve trips (`RELEASE(battery_reserve)`, then it flies home);
+  - it cannot find an inspection point or a route (`route_unreachable`);
+  - a reacquisition times out with `reallocate`.
+
+  Any agent also reopens the task if the owner has not been heard from for too long: heartbeat
+  times are passed between drones, so a drone out of direct radio range is not wrongly declared
+  dead. A reopen is row 16: epoch + 1, and the old owner is excluded for the new epoch. The
+  others bid again, and after `max_reallocations` the task is cancelled.
+- **Agreement on progress**: every owner transition is broadcast (`TARGET_STATE`) and relayed
+  once. Peers adopt it by the 7.8 rule: a terminal state if the epoch is ≥ theirs, a higher
+  epoch, or same-epoch progress from the owner itself. Owner updates carry a version number, so
+  messages that arrive out of order never move a view backwards.
+- **External cues**: the owner verifies on site. Its own sensor must meet the confirmation
+  criteria before anything is logged. If nothing is seen within `confirmation.timeout` of
+  arriving, the cue is CANCELLED with `cue_not_confirmed` (row 17) and never logged.
+- **Target log** (`logging_/target_log.py`): each agent keeps its own logbook. At the end the
+  logbooks and every agent's final views are merged by target ID, with aliases resolved, into
+  `target_log.csv` with the section 13.2 columns. `messages_used` counts every message about the
+  target, and duplicate logged inspections are marked `duplicate_inspection`.
+- **Engage missions** (`mission.neutralize_on_complete`, a new config section): when the owner
+  logs the target, the world marks the matching ground-truth target NEUTRALIZED
+  (`TARGET_NEUTRALIZED`), and it produces no more observations.
+- **Dashboard**:
+  - an owner lock line (dashed while flying, solid red with a ring when locked) and a
+    `LOCK n/10 s` timer;
+  - two "WHY <winner>" lines under the bids;
+  - a larger target crosshair, a red ✕ "NEUTRALIZED" marker and a green "MISSION COMPLETE" or
+    "TARGET LOGGED" banner;
+  - mission modes and target states in the legend;
+  - the EVENTS panel now keeps the important events (it used to be emptied by radio traffic).
+
+### Acceptance check
+| Criterion | Result |
+|---|---|
+| `default`: owner flies a valid route, inspects for `inspection.duration`, logs, returns to patrol; one COMPLETED row | D2 commits at 89.7 s, locks at 90.6 s, logs at 100.6 s after 10.0 s of lock (mean confidence 0.79), and is back on patrol at 103.4 s. `target_log.csv` has one COMPLETED row; the estimate is within 1 m of GT-1. |
+| `tracking_loss`: track lost and reacquired, timer paused | Lost at 95.7 s with 3 s counted, spiral search, reacquired at 101.1 s, timer resumed from 3 s, logged at 110.5 s |
+| `target_in_restricted`: inspected from outside the zone or cancelled with `no_feasible_bidders` | The cue deep inside RZ-1 is CANCELLED with `no_feasible_bidders` (every bid: `no_inspection_point`). The edge target is never confirmed, so it is never inspected. |
+| A cue at a location with no target ends CANCELLED and is never logged | `external_cue`: the second cue is CANCELLED with `cue_not_confirmed`, and there is no TARGET_LOGGED for it. The first cue is verified on site and logged. |
+| (demo) four drones, parameters decide, one engages | `mission`: D1 `insufficient_energy`, D2 wins (matches the baseline), GT-1 is NEUTRALIZED at 50.6 s by D2 with an estimate error of 0.6 m |
+| (swap) owner lost mid-mission | D2 failed: the others reopen after about 7 s (epoch 1, D2 excluded) and D4 completes the mission. D2 battery-reserve: D2 releases at once and D4 is chosen 1.6 s later. |
+
+Across all scenarios there are 0 geofence and 0 true separation violations. No target is ever
+logged without confirmation and a full inspection; a test checks this over 8 scenarios.
+
+**Tests:** 345 passed. New: `tests/sim/test_phase4_inspection.py` (every criterion above;
+reacquire timeout with cancel and with reallocate; `max_reallocations`; the logging invariant
+over 8 scenarios) and `tests/unit/test_mission.py` (spiral, the new rows, the inspection guard,
+logbook merge and duplicate marking). Earlier tests that assumed "the owner does not fly yet"
+now check the same properties together with the completed mission.
+
+### Phase 4 decisions to review
+1. **Engagement point at the confidence midpoint.** The inspection point is now where the
+   noise-free confidence is halfway between `min_confidence` (0.6) and `base` (0.95): 7.6 m at a
+   60 m sensor radius. At the threshold itself, about half the noisy observations fall below 0.6
+   and the lock timer barely advances.
+2. **Three small additions to the lifecycle table**, each commented in `target_state.py`:
+   - row 10 also from ENROUTE: the owner arrives but the track is already LOST;
+   - row 17 also from ENROUTE: a cue where there is nothing to see;
+   - row 6 also from the active states, when a reopen is refused because `max_reallocations` is
+     reached (8.4 says the task is then cancelled, but the table had no row for it).
+3. **`default.yaml`: `association.ignore_after_complete: 400`** instead of the plan's 60. GT-1
+   stays where it is in that scenario, so after 60 s D2 re-detects and re-inspects it on every
+   lap (3 COMPLETED rows), but the plan's acceptance check asks for one row. The schema default
+   stays 60, and other scenarios use it.
+4. **Owner-failure detection uses passed-on heartbeat times** (`seen` in HEARTBEAT): the limit is
+   `miss_limit × period + max_message_age`. Without this, a drone that never heard the owner
+   directly (short radio range) would reopen the task.
+5. **New config section `mission`** (`neutralize_on_complete`, default false). The original
+   inspection behaviour is unchanged unless a scenario turns it on, as `mission.yaml` does.
+6. After a reacquisition the owner flies back to an inspection point of the new estimate: the
+   spiral can leave it up to 60 m away, where confidence is too low for the timer.

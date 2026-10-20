@@ -1,0 +1,153 @@
+# Phase 4+: like default.yaml, but GT-1 is hidden from t = 93 s to t = 101 s, in the
+# middle of D2's inspection. The track goes STALE then LOST, the owner starts a
+# square-spiral search (REACQUIRING), finds the target again when it reappears,
+# and finishes the inspection. timer_on_loss: pause keeps the seconds already counted.
+
+sim:
+  dt: 0.1
+  duration: 200
+  seed: 42
+  headless: false
+  map_size: [2000, 2000]          # meters, for drawing
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-1
+      polygon: [[800, 600], [1100, 600], [1100, 1000], [800, 1000]]
+
+network:
+  comm_range: 1500
+  latency: [0.05, 0.2]
+  packet_loss: 0.05
+  max_message_age: 5.0
+  partitions: []                  # e.g. [{start: 60, end: 120, groups: [[D1, D2], [D3, D4]]}]
+
+heartbeat:
+  period: 1.0
+  miss_limit: 3
+
+allocation:
+  weights: {time: 1.0, energy: 0.5, battery: 0.3}
+  round_period: 0.5
+  consensus_rounds: 3
+  allocation_timeout: 10.0
+  max_reallocations: 2
+
+confirmation:
+  window: 5.0
+  timeout: 15.0
+  min_observations: 3
+  min_mean_confidence: 0.6
+  min_distinct_observers: 1
+  detector_holds: true
+  hold_max: 8.0
+
+association:
+  radius: 30
+  ignore_after_complete: 400      # PLAN.md uses 60; GT-1 stays put here, so 60 s would re-inspect it every lap
+
+observation:
+  max_observation_age: 3.0
+  obs_share_hz: 1.0
+
+confidence:
+  base: 0.95
+  falloff_exp: 1.5
+  noise_std: 0.05
+  spurious_conf_range: [0.2, 0.6]
+  low_threshold: 0.4
+  medium_threshold: 0.7
+
+track:
+  smoothing: 0.3
+  stale_after: 1.5
+  lost_after: 3.0
+
+reacquire:
+  timeout: 20.0
+  leg_step: 40
+  timeout_action: cancel          # cancel | reallocate
+
+inspection:
+  duration: 10.0
+  min_confidence: 0.6
+  timer_on_loss: pause            # pause | reset
+  standoff_alt: 60
+  energy_margin: 1.2
+  candidate_count: 16
+
+navigation:
+  cruise_alt: 60
+  arrival_tolerance: 5.0
+  alt_tolerance: 2.0
+  replan_limit: 3
+  planner_clearance: 1.0          # added in Phase 2: planner nodes sit this far outside the margin
+
+safety:
+  min_separation: 25
+  separation_buffer: 10
+  separation_horizon: 3.0
+
+mission:
+  neutralize_on_complete: false   # true: the logged target is marked NEUTRALIZED (simulated engage mission)
+
+drone_defaults:
+  max_speed: 15                   # m/s
+  climb_rate: 3                   # m/s
+  comm_range: 1500
+  capacity_wh: 100
+  reserve_pct: 0.20
+  critical_pct: 0.08
+  k_h: 0.004
+  k_c: 0.02
+  k_d: 0.002
+  hover_power: 0.05
+  sensor:
+    radius: 80
+    half_fov_deg: 45              # at 60 m altitude: r_eff = min(80, 60) = 60 m
+    alt_band: [20, 120]
+    rate_hz: 2
+    p_detect: 0.9
+    position_noise_std: 3.0
+    false_obs_rate: 0.0
+
+drones:
+  - id: D1
+    pos: [200, 300]
+    alt: 60
+    battery_pct: 0.85
+    home: [100, 100, 0]
+    patrol: [[200, 300, 60], [600, 300, 60], [600, 500, 60], [200, 500, 60]]
+  - id: D2
+    pos: [1500, 400]
+    alt: 60
+    battery_pct: 0.70
+    home: [100, 100, 0]
+    patrol: [[1500, 400, 60], [1800, 400, 60], [1800, 900, 60], [1350, 900, 60]]   # passes 50 m from GT-1
+  - id: D3
+    pos: [900, 1600]
+    alt: 60
+    battery_pct: 0.30
+    home: [100, 100, 0]
+    patrol: [[900, 1600, 60], [1200, 1600, 60], [1200, 1800, 60], [900, 1800, 60]]
+  - id: D4
+    pos: [1700, 1700]
+    alt: 60
+    battery_pct: 0.95
+    home: [100, 100, 0]
+    patrol: [[1700, 1700, 60], [1850, 1700, 60], [1850, 1850, 60], [1700, 1850, 60]]
+
+targets:                          # ground truth; agents never read this directly
+  - id: GT-1
+    pos: [1300, 900]
+    alt: 0
+    appear_at: 10
+    hidden_intervals: [[93, 101]]
+
+scenario_events: []
+  # - {t: 20, type: external_cue, pos: [1300, 900]}
+  # - {t: 90, type: fail_drone, drone: D2}
+  # - {t: 30, type: set_battery, drone: D1, battery_pct: 0.15}

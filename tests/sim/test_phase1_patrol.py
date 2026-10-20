@@ -105,7 +105,7 @@ def test_operator_fail_goes_through_scenario():
 def test_low_battery_drone_returns_home_and_never_drops_below_reserve():
     cfg = load_config(DEFAULT)
     w, hist = run(cfg)
-    returns = [r for r in w.log.of_type("DRONE_MODE") if r["data"]["to"] == "RETURNING"]
+    returns = [r for r in w.log.of_type("DRONE_MODE") if r["data"]["to"] == "RETURNING" and r["data"]["reason"] == "battery_reserve"]
     assert [r["actor"] for r in returns] == ["D3"]  # D3 starts at 30%
     d3 = w.snapshot.drone("D3")
     assert (d3.x, d3.y, d3.alt) == pytest.approx(cfg.drones[2].home)

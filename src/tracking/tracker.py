@@ -15,6 +15,7 @@ from src.config import AssociationConfig, ConfirmationConfig, TrackConfig
 from src.tracking.observation import AgentObservation
 from src.tracking.target_state import (
     STATE_RANK,
+    TERMINAL,
     Confirmation,
     TargetRecord,
     TargetState,
@@ -224,6 +225,7 @@ class Tracker:
                     }))  # fmt: skip
                     if result is Confirmation.CONFIRMED:
                         rec.evidence = [(o[0], o[1], o[2], o[3]) for o in window]
+                        rec.confirmed_at = now  # also for a cue confirmed on site, while ENROUTE / TRACKING
                     ctx = TransitionContext(actor=self.owner_id, now=now)
                     if result is Confirmation.CONFIRMED and rec.state is TargetState.DETECTED:
                         events.append(self._transition_event(apply_transition(rec, TargetState.CONFIRMED, ctx, "criteria_met")))
@@ -251,6 +253,8 @@ class Tracker:
             "target_id": rec.id, "aliases": sorted(rec.aliases), "est_pos": [rec.est_pos[0], rec.est_pos[1]],
             "alt": rec.est_alt, "source": rec.source, "state": rec.state.value, "confirmation": rec.confirmation.value,
             "epoch": rec.epoch, "owner": rec.owner, "created_at": rec.created_at, "created_by": rec.created_by,
+            "reallocations": rec.reallocations, "excluded": dict(rec.excluded), "cancel_reason": rec.cancel_reason,
+            "version": len(rec.history) if rec.owner == self.owner_id else rec.owner_version,
         }  # fmt: skip
         if with_evidence and rec.evidence:
             d["evidence"] = [list(o) for o in rec.evidence]
@@ -286,15 +290,59 @@ class Tracker:
                 rec.observations = sorted(rec.observations + [(t, c, o, i, True) for t, c, o, i in ev_obs if i not in known])
                 self.seen_obs.update(o[3] for o in ev_obs)
                 rec.confirmation, rec.evidence = Confirmation.CONFIRMED, ev_obs
+                rec.confirmed_at = rec.confirmed_at if rec.confirmed_at is not None else now
                 out.events.append(TrackerEvent("CONFIRMATION_RESULT", rec.id, rec.epoch, {
                     "result": "CONFIRMED", "via": f"peer_evidence:{sender}", **info}))  # fmt: skip
                 if rec.state is TargetState.DETECTED:
                     ctx = TransitionContext(actor=self.owner_id, now=now)
                     out.events.append(self._transition_event(
                         apply_transition(rec, TargetState.CONFIRMED, ctx, f"peer_evidence:{sender}")))  # fmt: skip
+        adopted = self._adopt_remote_state(rec, summ, sender, now)
+        if adopted is not None:
+            out.events.append(adopted)
         out.merges = self._merge_duplicates(rec.id)
         out.target_id = self.resolve(rec.id)
         return out
+
+    def _adopt_remote_state(self, rec: TargetRecord, summ: dict, sender: str, now: float) -> TrackerEvent | None:
+        """Section 7.8 adoption rule for a peer's view of the lifecycle.
+
+        - a terminal state is adopted whenever its epoch is >= ours;
+        - a higher epoch (a reopen elsewhere) is adopted;
+        - at the same epoch, progress reported by the owner itself is adopted (the owner is the
+          only agent allowed to move the task forward after allocation).
+        """
+        if rec.terminal:
+            return None
+        to = TargetState(summ["state"])
+        r_epoch = int(summ.get("epoch", 0))
+        if to is rec.state and r_epoch == rec.epoch:
+            return None
+        owner = summ.get("owner")
+        version = int(summ.get("version", 0))
+        if to in TERMINAL:
+            ok = r_epoch >= rec.epoch
+        elif r_epoch > rec.epoch:
+            ok = True
+        else:
+            ok = (r_epoch == rec.epoch and owner == sender and rec.owner in (None, sender)
+                  and to not in (TargetState.DETECTED, TargetState.CONFIRMED)
+                  and version > rec.owner_version)  # newer than what we adopted from the owner  # fmt: skip
+        if not ok:
+            return None
+        rec.owner_version = version
+        frm = rec.state
+        rec.state, rec.epoch, rec.owner = to, r_epoch, owner
+        rec.reallocations = max(rec.reallocations, int(summ.get("reallocations", 0)))
+        rec.excluded.update({int(k): v for k, v in summ.get("excluded", {}).items()})
+        if to is TargetState.CONFIRMED and rec.confirmed_at is None:
+            rec.confirmed_at = now
+        if to in TERMINAL:
+            rec.terminal_at = now
+            rec.cancel_reason = summ.get("cancel_reason")
+        return TrackerEvent("TARGET_TRANSITION", rec.id, rec.epoch, {
+            "from": frm.value, "to": to.value, "row": None, "reason": f"adopted_from:{sender}", "by": self.owner_id,
+        })  # fmt: skip
 
     def check_evidence(self, evidence: list, now: float, known_observers: frozenset[str]) -> tuple[bool, dict]:
         """The 7.5 criteria applied to a peer's evidence, in a window ending at its newest observation."""

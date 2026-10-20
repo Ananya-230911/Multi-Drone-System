@@ -95,12 +95,15 @@ class MapRenderer:
             for g in snap.ground_truth:
                 if g.appeared:
                     gx, gy = self.to_screen(*g.pos)
-                    L.draw_gt_marker(surf, gx, gy, g.visible)
-                    txt = fonts["small"].render(g.id + ("" if g.visible else " (hidden)"), True, L.GT if g.visible else L.MUTED)
+                    L.draw_gt_marker(surf, gx, gy, g.visible, g.neutralized)
+                    label = g.id + (" NEUTRALIZED" if g.neutralized else ("" if g.visible else " (hidden)"))
+                    col = L.WARN if g.neutralized else (L.GT if g.visible else L.MUTED)
+                    txt = fonts["normal" if g.neutralized else "small"].render(label, True, col)
                     surf.blit(txt, (gx - txt.get_width() - 10, gy + 6))  # left of the marker; drone/target labels go right
         self._draw_targets(surf, snap, fonts)
         if ui.show_messages:
             self._draw_flashes(surf, snap)
+        self._draw_locks(surf, snap)
         sel = snap.drone(ui.selected) if ui.selected else None
         if sel is not None and snap.comm_range > 0 and sel.mode != "FAILED":
             cx, cy = self.to_screen(sel.x, sel.y)
@@ -175,6 +178,21 @@ class MapRenderer:
             col = L.target_colour(tv.state)
             surf.blit(fonts["small"].render(f"{tid} {L.target_label(tv.state)}", True, col), (x + 10, y + 6))  # below; drone labels sit above
 
+    def _draw_locks(self, surf: pygame.Surface, snap: Snapshot) -> None:
+        """Owner on a mission: a line from the drone to its target (solid when locked)."""
+        for d in snap.drones:
+            if not d.current_task or d.mode not in ("ENROUTE", "INSPECTING", "REACQUIRING"):
+                continue
+            tv = next((t for t in d.targets if t.id == d.current_task), None)
+            if tv is None:
+                continue
+            a, b = self.to_screen(d.x, d.y), self.to_screen(*tv.est_pos)
+            if d.mode == "INSPECTING" and tv.state == "TRACKING":
+                pygame.draw.line(surf, L.WARN, a, b, 3)
+                pygame.draw.circle(surf, L.WARN, (int(b[0]), int(b[1])), 22, 2)
+            else:
+                L.dashed_line(surf, L.WARN, a, b, 2, 8)
+
     def _draw_flashes(self, surf: pygame.Surface, snap: Snapshot) -> None:
         """A fading line from sender to recipient for each message delivered in the last FLASH_SECONDS."""
         pos = {d.id: self.to_screen(d.x, d.y) for d in snap.drones}
@@ -222,3 +240,13 @@ class MapRenderer:
         )
         col = L.WARN if ui.paused or snap.geofence_violations or snap.separation_violations else L.TEXT
         surf.blit(fonts["normal"].render(text, True, col), (bar.x + 10, bar.y + 8))
+        done = [e for e in snap.recent_events if e["type"] in ("TARGET_NEUTRALIZED", "TARGET_LOGGED")]
+        if done:
+            e = done[-1]
+            d = e["data"]
+            msg = (f"MISSION COMPLETE: {d['ground_truth']} neutralized by {d['by']} at {e['t']:.1f} s"
+                   if e["type"] == "TARGET_NEUTRALIZED" else f"TARGET LOGGED: {e.get('target_id')} by {e['actor']} at {e['t']:.1f} s")
+            banner = fonts["title"].render(msg, True, (20, 20, 20))
+            box = pygame.Rect(self.rect.centerx - banner.get_width() // 2 - 12, self.rect.bottom - 44, banner.get_width() + 24, 32)
+            pygame.draw.rect(surf, (120, 230, 120), box, border_radius=6)
+            surf.blit(banner, (box.x + 12, box.y + 7))

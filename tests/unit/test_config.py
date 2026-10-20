@@ -26,11 +26,10 @@ def test_default_config_loads_with_section_12_values():
     assert d3.battery_pct == 0.30 and d3.params.sensor.radius == 80
 
 
-def test_later_phase_sections_reported_as_info():
+def test_every_section_is_used_from_phase_4():
     cfg = load_config(DEFAULT)
-    assert any("'reacquire'" in m for m in cfg.info)  # used from Phase 4
-    assert not any("'allocation'" in m for m in cfg.info)
-    assert not any("'drones'" in m for m in cfg.info)
+    assert cfg.info == ()  # no section is "validated but unused" any more
+    assert cfg.mission.neutralize_on_complete is False
 
 
 def test_missing_sections_use_defaults(raw):

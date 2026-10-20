@@ -70,8 +70,9 @@ def test_default_detector_creates_and_confirms_record(default_world):
     assert [t.id for t in recs["D2"]] == ["T-D2-001"]
     t = recs["D2"][0]
     assert t.confirmation == "CONFIRMED"
-    # Radio off: D2 hears no peers, so from Phase 3 its own auction allocates the target to itself.
-    assert t.state == "ALLOCATED" and t.owner == "D2"
+    # Radio off: D2 hears no peers, so its own auction allocates the target to itself (Phase 3)
+    # and it completes the mission alone (Phase 4).
+    assert t.state == "COMPLETED" and t.owner == "D2"
     gt = w.cfg.targets[0].pos
     assert abs(t.est_pos[0] - gt[0]) < 10 and abs(t.est_pos[1] - gt[1]) < 10
     assert all(not recs[d] for d in ("D1", "D3", "D4"))  # no messages yet: only the detector knows
@@ -79,8 +80,9 @@ def test_default_detector_creates_and_confirms_record(default_world):
 
 def test_default_lifecycle_detect_confirm_then_allocate(default_world):
     trans = [(e["data"]["from"], e["data"]["to"], e["data"]["row"]) for e in default_world.log.of_type("TARGET_TRANSITION")]
-    # Phase 2 ends at row 2; with the radio off the Phase 3 auction then commits D2 alone (row 5).
-    assert trans == [("UNKNOWN", "DETECTED", 1), ("DETECTED", "CONFIRMED", 2), ("CONFIRMED", "ALLOCATED", 5)]
+    # Rows 1-2 (Phase 2); radio off, so D2's own auction commits it alone (row 5, Phase 3); then the mission.
+    assert trans[:3] == [("UNKNOWN", "DETECTED", 1), ("DETECTED", "CONFIRMED", 2), ("CONFIRMED", "ALLOCATED", 5)]
+    assert [t[2] for t in trans[-2:]] == [14, 15]
 
 
 def test_default_confirm_hold_entered_and_left(default_world):
@@ -144,7 +146,7 @@ def test_target_inside_zone_seen_from_edge_but_never_overflown():
     for h in holds:
         goal = tuple(h["data"]["waypoints"][-1])
         assert w.fence.contains_point(*goal)  # hold point is outside the zone
-    recs = records(w)["D1"]
+    recs = [t for t in records(w)["D1"] if not t.id.startswith("T-EXT")]  # the cue inside the zone is a separate check
     assert recs and all(t.state == "CANCELLED" and t.confirmation == "REJECTED" for t in recs)
     assert w.geofence_violations == []
 
@@ -157,7 +159,7 @@ def test_each_detector_holds_one_local_record():
     w.run()
     recs = records(w)
     for d in ("D1", "D2", "D3"):
-        assert [t.id for t in recs[d]] == [f"T-{d}-001"]
+        assert recs[d][0].id == f"T-{d}-001"  # later laps re-detect after ignore_after_complete
         assert recs[d][0].confirmation == "CONFIRMED"
     assert recs["D4"] == []
 

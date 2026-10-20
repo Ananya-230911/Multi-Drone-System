@@ -54,12 +54,28 @@ class CoordinationMixin:
         self._last_heartbeat: float | None = None
         self._last_share: dict[str, float] = {}
         self._announced: set[str] = set()  # targets we already sent TARGET_DETECTED for
-        self._state_announced: set[tuple[str, str]] = set()  # (target, state) TARGET_STATE already sent
+        self._state_announced: set[tuple] = set()  # TARGET_STATE already sent for (target, state, epoch, version)
+        self.last_alive: dict[str, float] = {}  # newest evidence each peer was alive: direct or gossiped heartbeat time
+        self._reopened: set[tuple[str, int]] = set()
         self.auction = Auction(self.id, sh.allocation)
         self._cost_cfg = CostConfig(sh.allocation.weights, sh.inspection, sh.confidence)
         self._yielding_to: str | None = None
 
     # ------------------------------------------------------------------ peers
+
+    def owner_alive(self: "Drone", owner: str, now: float) -> bool | None:
+        """Is the owner alive? From direct heartbeats or heartbeat times gossiped by peers.
+
+        None if this agent has never had any evidence about the owner. Gossiped times are
+        older by up to one heartbeat period per hop, so the limit adds max_message_age.
+        """
+        if owner == self.id:
+            return True
+        t = self.last_alive.get(owner)
+        if t is None:
+            return None
+        hb = self.shared.heartbeat
+        return now - t <= hb.miss_limit * hb.period + self.shared.max_message_age
 
     def alive_peers(self: "Drone", now: float) -> set[str]:
         limit = self.shared.heartbeat.miss_limit * self.shared.heartbeat.period
@@ -86,6 +102,7 @@ class CoordinationMixin:
         self.outbox.send("HEARTBEAT", now, {
             "pos": [s.x, s.y, s.alt], "vel": [s.vx, s.vy, s.vz], "battery_pct": self.battery.pct,
             "mode": s.mode.value, "current_task": s.current_task, "epoch": s.task_epoch, "docked": self.docked,
+            "seen": dict(self.last_alive),  # gossip: when this drone last had evidence that each peer was alive
         })  # fmt: skip
 
     # ------------------------------------------------------------------ inbox
@@ -106,6 +123,10 @@ class CoordinationMixin:
         p = msg.payload
         self.peers[msg.sender] = PeerInfo(tuple(p["pos"]), tuple(p["vel"]), p["battery_pct"], p["mode"],
                                           p.get("current_task"), bool(p.get("docked")), msg.t_sent, now)  # fmt: skip
+        self.last_alive[msg.sender] = max(self.last_alive.get(msg.sender, msg.t_sent), msg.t_sent)
+        for pid, t in p.get("seen", {}).items():
+            if pid != self.id:
+                self.last_alive[pid] = max(self.last_alive.get(pid, t), t)
 
     def _on_target_detected(self: "Drone", msg: Message, now: float) -> None:
         self._apply_summary(msg.payload["summary"], msg.sender, now)
@@ -148,10 +169,14 @@ class CoordinationMixin:
                                                           p.get("winning_bid"), is_claim, now))  # fmt: skip
 
     def _on_release(self: "Drone", msg: Message, now: float) -> None:
+        # The reopen itself arrives as TARGET_STATE (higher epoch); this is the human-readable reason.
         tid = self.tracker.resolve(msg.target_id or "")
         self._emit(now, "CLAIM_CONFLICT" if msg.payload.get("reason") == "conflict_lost" else "REALLOCATION",
                    {"from": msg.sender, "reason": msg.payload.get("reason"), "note": "release received"},
                    target_id=tid, epoch=msg.epoch)  # fmt: skip
+
+    def _on_target_logged(self: "Drone", msg: Message, now: float) -> None:
+        self._apply_summary(msg.payload["summary"], msg.sender, now)
 
     # ------------------------------------------------------------------ records from peers
 
@@ -178,16 +203,18 @@ class CoordinationMixin:
     def _on_tracker_events(self: "Drone", now: float, events: list) -> None:
         for ev in events:
             self._emit(now, ev.type, ev.data, target_id=ev.target_id, epoch=ev.epoch)
-            if ev.type == "TARGET_TRANSITION" and ev.data["to"] == "CONFIRMED":
-                self._announce_state(now, ev.target_id, ev.data)
+            if ev.type == "TARGET_TRANSITION":
+                self._announce_state(now, ev.target_id, ev.data)  # relayed once per transition
 
     def _announce_state(self: "Drone", now: float, tid: str, data: dict) -> None:
         tid = self.tracker.resolve(tid)
-        key = (tid, data["to"])
-        if key in self._state_announced or self.tracker.record(tid) is None:
+        rec = self.tracker.record(tid)
+        if rec is None:
+            return
+        key = (tid, data["to"], rec.epoch, len(rec.history))
+        if key in self._state_announced:
             return
         self._state_announced.add(key)
-        rec = self.tracker.record(tid)
         self.outbox.send("TARGET_STATE", now, {
             "from": data["from"], "to": data["to"], "reason": data.get("reason"),
             "summary": self.tracker.summary(tid, with_evidence=True),
@@ -245,9 +272,43 @@ class CoordinationMixin:
         self._run_actions(now, self.auction.start(tid, rec.epoch, now, bid))
 
     def _allocation_step(self: "Drone", now: float) -> None:
+        self._check_owner_timeouts(now)
         for tid in sorted(self.tracker.records):
             self._maybe_start_auction(now, tid)
         self._run_actions(now, self.auction.tick(now, self.alive_peers(now)))
+
+    def _check_owner_timeouts(self: "Drone", now: float) -> None:
+        """8.4: any agent reopens a task whose owner has not been heard of for too long (row 16)."""
+        active = (TargetState.ALLOCATED, TargetState.ENROUTE, TargetState.TRACKING,
+                  TargetState.TRACKING_LOST, TargetState.REACQUIRING)  # fmt: skip
+        for tid in sorted(self.tracker.records):
+            rec = self.tracker.records[tid]
+            if rec.state not in active or rec.owner in (None, self.id) or (tid, rec.epoch) in self._reopened:
+                continue
+            if self.owner_alive(rec.owner, now) is not False:
+                continue
+            self._reopened.add((tid, rec.epoch))
+            old_owner = rec.owner
+            to = TargetState.DETECTED if rec.is_cue else TargetState.CONFIRMED
+            ctx = TransitionContext(actor=self.id, now=now, trigger="owner_timeout",
+                                    max_reallocations=self.shared.allocation.max_reallocations)  # fmt: skip
+            try:
+                ev = apply_transition(rec, to, ctx, f"owner_timeout:{old_owner}")
+            except IllegalTransition:
+                ctx = TransitionContext(actor=self.id, now=now, trigger="max_reallocations",
+                                        max_reallocations=self.shared.allocation.max_reallocations)  # fmt: skip
+                try:
+                    ev = apply_transition(rec, TargetState.CANCELLED, ctx, "max_reallocations")
+                except IllegalTransition as exc:
+                    self._emit(now, "ILLEGAL_TRANSITION", {"to": to.value, "error": str(exc)}, target_id=tid, epoch=rec.epoch)
+                    continue
+                self._emit(now, "TASK_CANCELLED", {"reason": "max_reallocations"}, target_id=tid, epoch=rec.epoch)
+            data = {"from": ev.frm.value, "to": ev.to.value, "row": ev.row, "reason": ev.reason, "by": self.id}
+            self._emit(now, "TARGET_TRANSITION", data, target_id=tid, epoch=ev.epoch)
+            if ev.to is not TargetState.CANCELLED:
+                self._emit(now, "REALLOCATION", {"reason": "owner_timeout", "previous_owner": old_owner,
+                                                 "new_epoch": rec.epoch}, target_id=tid, epoch=rec.epoch)  # fmt: skip
+            self._announce_state(now, tid, data)
 
     def _run_actions(self: "Drone", now: float, actions: list[Action]) -> None:
         for a in actions:

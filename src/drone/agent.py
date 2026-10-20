@@ -42,12 +42,14 @@ from src.config import (
     NavigationConfig,
     ObservationConfig,
     Point3,
+    ReacquireConfig,
     SafetyConfig,
     TrackConfig,
 )
 from src.drone.battery import Battery, EnergyModel, route_cost
 from src.drone.coordination import CoordinationMixin
-from src.drone.fsm import DroneMode, check_transition
+from src.drone.mission import MissionMixin
+from src.drone.fsm import MISSION, DroneMode, check_transition
 from src.drone.navigation import Navigator, StepResult
 from src.drone.sensor import confidence_category, effective_radius
 from src.drone.state import DroneState
@@ -81,6 +83,7 @@ class SharedContext:
     heartbeat: HeartbeatConfig
     safety: SafetyConfig
     max_message_age: float
+    reacquire: ReacquireConfig
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,8 @@ class TargetView:
     confirmed_at: float | None
     epoch: int
     owner: str | None
+    insp_seconds: float | None = None  # owner's accumulated inspection time (owner's own view only)
+    insp_of: float | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,7 @@ class DroneView:
     alive_peers: tuple[str, ...] = ()
     auctions: tuple["AuctionView", ...] = ()
     yielding_to: str | None = None
+    mission_point: Point3 | None = None
 
 
 @dataclass(frozen=True)
@@ -153,7 +159,7 @@ class AuctionView:
     heard: tuple[str, ...]
 
 
-class Drone(CoordinationMixin):
+class Drone(CoordinationMixin, MissionMixin):
     def __init__(self, cfg: DroneConfig, shared: SharedContext):
         p = cfg.params
         self.id = cfg.id
@@ -184,6 +190,7 @@ class Drone(CoordinationMixin):
         self.safety_reason: str | None = None
         self.events: list[dict[str, Any]] = []
         self._init_coordination()  # inbox, outbox, peer table, auction
+        self._init_mission()  # owner mission and logbook
 
     # ------------------------------------------------------------------ tick
 
@@ -242,7 +249,8 @@ class Drone(CoordinationMixin):
             return
         e_home = self.energy_to_home()
         verdict = monitor.check_energy(
-            self.battery, e_home, self._lookahead_wh(dt), check_reserve=s.mode in (DroneMode.PATROL, DroneMode.CONFIRM_HOLD)
+            self.battery, e_home, self._lookahead_wh(dt),
+            check_reserve=s.mode in (DroneMode.PATROL, DroneMode.CONFIRM_HOLD) or s.mode in MISSION,
         )
         if verdict.kind == "LAND":
             self._emit(now, "SAFETY_LAND", {"reason": verdict.reason, "battery_wh": self.battery.charge_wh})
@@ -254,14 +262,19 @@ class Drone(CoordinationMixin):
                 "e_home_wh": e_home, "reserve_wh": self.battery.reserve_wh,
             })  # fmt: skip
             self.hold_target = None
-            self._set_mode(now, DroneMode.RETURNING, verdict.reason)
+            if s.current_task is not None:
+                self._release(now, "battery_reserve")  # RELEASE first (6.4), then home
+            if s.mode is not DroneMode.RETURNING:
+                self._set_mode(now, DroneMode.RETURNING, verdict.reason)
             self._go_home(now)
+            return
+        if s.mode is not DroneMode.SAFETY_HOLD and self._mission_step(now, dt):
             return
         if s.mode is DroneMode.SAFETY_HOLD:
             self._try_replan(now)
         elif s.mode is DroneMode.CONFIRM_HOLD:
             self._check_hold_exit(now)
-        elif s.mode is DroneMode.PATROL and self.shared.confirmation.detector_holds:
+        elif s.mode is DroneMode.PATROL and self.shared.confirmation.detector_holds and s.current_task is None:
             self._maybe_start_hold(now, observed)
 
     # CONFIRM_HOLD ----------------------------------------------------------
@@ -476,6 +489,8 @@ class Drone(CoordinationMixin):
             return
         if self._then == "patrol":
             idx = self._then_index
+            if s.mode is DroneMode.RETURNING:
+                self._set_mode(now, DroneMode.PATROL, "reached_patrol_waypoint")
             self._emit(now, "WAYPOINT_REACHED", {"index": idx, "pos": [s.x, s.y], "alt": s.alt})
             s.patrol_index = (idx + 1) % len(s.patrol_route)
             self.navigator = Navigator(s.patrol_route, loop=True, start_index=s.patrol_index)
@@ -537,6 +552,8 @@ class Drone(CoordinationMixin):
                 category=confidence_category(r.last_confidence, cc), freshness=r.freshness,
                 n_obs=len(r.observations), obs_ids=tuple(o[3] for o in r.observations),
                 created_at=r.created_at, confirmed_at=r.confirmed_at, epoch=r.epoch, owner=r.owner,
+                insp_seconds=self.mission.accum if self.mission and self.mission.target_id == r.id else None,
+                insp_of=self.shared.inspection.duration,
             )
             for _, r in sorted(self.tracker.records.items())
         )  # fmt: skip
@@ -551,6 +568,7 @@ class Drone(CoordinationMixin):
             alive_peers=tuple(sorted(self.alive_peers(self._last_heartbeat or 0.0))),
             auctions=tuple(self._auction_view(tid) for tid in sorted(self.auction.entries)),
             yielding_to=self._yielding_to,
+            mission_point=self.mission.point if self.mission else None,
         )  # fmt: skip
 
     def _auction_view(self, tid: str) -> AuctionView:

@@ -94,8 +94,11 @@ class Panel:
         surf.blit(fonts["title"].render(f"TARGET {tv.id}  [{tv.state}]", True, col), (x0, y))
         y += 22
         age = snap.t - tv.created_at
+        lock = ""
+        if tv.insp_seconds is not None and tv.insp_of:
+            lock = f"   LOCK {tv.insp_seconds:4.1f}/{tv.insp_of:.0f} s"
         lines = [
-            (f"confirmation {tv.confirmation:<9} conf {tv.last_confidence:4.2f} {tv.category:<6} {tv.freshness}", L.TEXT),
+            (f"confirmation {tv.confirmation:<9} conf {tv.last_confidence:4.2f} {tv.category:<6} {tv.freshness}{lock}", L.TEXT),
             (f"owner {tv.owner or '-':<4} epoch {tv.epoch}   view of {holder}   age {age:4.0f}s"
              + (f"   aliases {','.join(tv.aliases)}" if tv.aliases else ""), L.TEXT),
             (f"agents agreeing: {agreeing}/{live}", (120, 230, 120) if agreeing == live else L.WARN),
@@ -127,12 +130,18 @@ class Panel:
             col = (120, 230, 120) if win else (L.TEXT if b.feasible else L.MUTED)
             surf.blit(fonts["mono_small"].render(line, True, col), (x0, y))
             y += 16
-        return y
+        for line in decision_text(av):
+            surf.blit(fonts["small"].render(line, True, (120, 230, 120)), (x0, y + 2))
+            y += 16
+        return y + 2
 
     def _events(self, surf, snap, fonts, x0, y, bottom):
         surf.blit(fonts["title"].render("EVENTS  (TAB: messages)", True, L.TEXT), (x0, y))
         y += 22
-        for e in reversed([e for e in snap.recent_events if e["type"] not in FEED_SKIP]):
+        # Peers copying the owner's progress ("adopted_from") would flood the feed; it stays in events.jsonl.
+        feed = [e for e in snap.recent_events if e["type"] not in FEED_SKIP
+                and not str(e.get("data", {}).get("reason", "")).startswith("adopted_from")]  # fmt: skip
+        for e in reversed(feed):
             if y > bottom - 15:
                 break
             surf.blit(fonts["small"].render(_describe(e), True, _event_colour(e)), (x0, y))
@@ -165,6 +174,19 @@ class Panel:
         pygame.draw.rect(surf, col, (x, y, int(w * max(0.0, min(pct, 1.0))), 6))
         rx = x + int(w * reserve)
         pygame.draw.line(surf, L.TEXT, (rx, y - 2), (rx, y + 8), 1)  # reserve marker
+
+
+def decision_text(av) -> list[str]:
+    """Two lines explaining why the winner won, from the bid breakdowns (cost: lower is better)."""
+    win = next((b for b in av.bids if b.drone == av.winner), None)
+    if win is None or not win.feasible:
+        return []
+    others = [f"{b.drone} {b.cost:.1f}" if b.feasible else f"{b.drone} can't ({b.reason})"
+              for b in av.bids if b.drone != av.winner]  # fmt: skip
+    lines = [f"WHY {win.drone}: lowest cost {win.cost:.1f} ({win.t_go:.0f} s to reach, {win.batt_after:.0f} Wh left after trip)"]
+    if others:
+        lines.append("others: " + ", ".join(others))
+    return lines
 
 
 def _msg_colour(mtype: str) -> tuple[int, int, int]:
@@ -209,6 +231,14 @@ def _describe(e: dict) -> str:
         return f"{t} {e['actor']} allocation failed for {tid}: {d.get('reason')}"
     if e["type"] == "CLAIM_CONFLICT":
         return f"{t} {e['actor']} claim conflict on {tid}: {d.get('result', d.get('reason'))}"
+    if e["type"] == "TARGET_NEUTRALIZED":
+        return f"{t} {d.get('ground_truth')} NEUTRALIZED by {d.get('by')} ({tid})"
+    if e["type"] == "TARGET_LOGGED":
+        return f"{t} {e['actor']} LOGGED {tid} ({d.get('inspection_duration', 0):.0f} s lock, mean conf {d.get('mean_confidence', 0):.2f})"
+    if e["type"] in ("TASK_COMPLETED", "TASK_CANCELLED", "TRACK_LOST", "REACQUIRE_START", "REACQUIRE_SUCCESS", "REACQUIRE_TIMEOUT"):
+        return f"{t} {e['actor']} {e['type']} {tid} {d.get('reason', '')}"
+    if e["type"] == "REALLOCATION":
+        return f"{t} {e['actor']} REALLOCATE {tid}: {d.get('reason')} (epoch {d.get('new_epoch', e.get('epoch'))})"
     if e["type"] == "SEPARATION_YIELD":
         return f"{t} {e['actor']} yields to {d.get('to')} (separation)"
     if e["type"] == "ROUTE_REJECTED":
@@ -219,7 +249,8 @@ def _describe(e: dict) -> str:
 
 
 def _event_colour(e: dict) -> tuple[int, int, int]:
-    if e["type"].startswith("SAFETY") or e["type"] in ("DRONE_FAILED", "ROUTE_REJECTED", "ALLOCATION_FAILED", "CLAIM_CONFLICT"):
+    if e["type"].startswith("SAFETY") or e["type"] in ("DRONE_FAILED", "ROUTE_REJECTED", "ALLOCATION_FAILED", "CLAIM_CONFLICT",
+                                                       "TARGET_NEUTRALIZED", "REALLOCATION", "TRACK_LOST"):
         return L.WARN
     if e["type"] == "DRONE_MODE":
         return L.mode_colour(e["data"].get("to", ""))

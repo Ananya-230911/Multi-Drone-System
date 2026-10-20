@@ -19,9 +19,10 @@ class GroundTruthTarget:
     appear_at: float = 0.0
     hidden_intervals: list[Point2] = field(default_factory=list)  # [start, end) in sim seconds
     manually_hidden: bool = False  # toggled by the operator (H key) or hide/show scenario events
+    neutralized_at: float | None = None  # simulated end of an engage mission (mission.neutralize_on_complete)
 
     def visible(self, now: float) -> bool:
-        if now < self.appear_at or self.manually_hidden:
+        if now < self.appear_at or self.manually_hidden or self.neutralized_at is not None:
             return False
         return not any(a <= now < b for a, b in self.hidden_intervals)
 

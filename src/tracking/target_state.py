@@ -81,6 +81,9 @@ class TargetRecord:
     cancel_reason: str | None = None
     history: list[TransitionEvent] = field(default_factory=list)
     relayed: bool = False  # first learned from a peer, not from this agent's own sensor
+    # Version of the owner's view last adopted (the owner's history length). Messages can arrive
+    # reordered; an older owner update must never move the local view backwards.
+    owner_version: int = 0
     # Observations that met the confirmation criteria: (t, confidence, observer, obs_id). Shared with peers
     # so they can check the criteria themselves (7.1: a peer report confirms only if its evidence qualifies).
     evidence: list[tuple[float, float, str, str]] = field(default_factory=list)
@@ -160,10 +163,17 @@ TABLE: tuple[Row, ...] = (
     Row(6, frozenset({S.CONFIRMED}), S.CANCELLED, lambda r, c: c.trigger in ("allocation_timeout", "max_reallocations")),
     Row(6, frozenset({S.DETECTED}), S.CANCELLED,
         lambda r, c: r.is_cue and c.trigger in ("allocation_timeout", "max_reallocations")),
+    # Row 6 also from the active states when a reopen is refused because max_reallocations is
+    # reached (8.4: "then the task is CANCELLED"); the table has no other row for that case.
+    Row(6, frozenset({S.ALLOCATED, S.ENROUTE, S.TRACKING, S.TRACKING_LOST, S.REACQUIRING}), S.CANCELLED,
+        lambda r, c: c.trigger == "max_reallocations" and r.reallocations >= c.max_reallocations),
     Row(7, frozenset({S.ALLOCATED}), S.ENROUTE, lambda r, c: c.route_valid, owner_only=True),
     Row(8, frozenset({S.ALLOCATED}), S.TRACKING, lambda r, c: c.inspection_point_valid and c.track_fresh, owner_only=True),
     Row(9, frozenset({S.ENROUTE}), S.TRACKING, lambda r, c: c.in_region and c.track_fresh, owner_only=True),
-    Row(10, frozenset({S.TRACKING}), S.TRACKING_LOST, lambda r, c: c.track_lost, owner_only=True),
+    # Row 10 also from ENROUTE (an addition): the owner arrives at the inspection point but the track
+    # is already LOST (target hidden on arrival), so it must be able to start reacquisition.
+    Row(10, frozenset({S.TRACKING, S.ENROUTE}), S.TRACKING_LOST,
+        lambda r, c: c.track_lost and (r.state is S.TRACKING or c.in_region), owner_only=True),
     Row(11, frozenset({S.TRACKING_LOST}), S.REACQUIRING, lambda r, c: c.battery_ok and c.route_valid, owner_only=True),
     Row(12, frozenset({S.REACQUIRING}), S.TRACKING, lambda r, c: c.in_region and c.track_fresh, owner_only=True),
     Row(13, frozenset({S.REACQUIRING}), S.CANCELLED,
@@ -173,8 +183,11 @@ TABLE: tuple[Row, ...] = (
     Row(15, frozenset({S.LOGGED}), S.COMPLETED, lambda r, c: c.logged, owner_only=True),
     Row(16, _ACTIVE, S.CONFIRMED, lambda r, c: not r.is_cue and _reopen_guard(r, c)),
     Row(16, _ACTIVE, S.DETECTED, lambda r, c: r.is_cue and _reopen_guard(r, c)),
-    Row(17, frozenset({S.TRACKING, S.REACQUIRING}), S.CANCELLED,
-        lambda r, c: r.is_cue and r.confirmation is C.REJECTED, owner_only=True),
+    # Row 17 also from ENROUTE (an addition): the owner is on site at a cue position where there is
+    # nothing to see, so its own observations never start a track and the cue is rejected there.
+    Row(17, frozenset({S.TRACKING, S.REACQUIRING, S.ENROUTE}), S.CANCELLED,
+        lambda r, c: r.is_cue and r.confirmation is C.REJECTED and (r.state is not S.ENROUTE or c.in_region),
+        owner_only=True),
 )  # fmt: skip
 
 

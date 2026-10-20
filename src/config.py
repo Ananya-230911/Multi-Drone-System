@@ -18,12 +18,12 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 import yaml
 
 # Sections the current build actually uses. Everything else is validated and ignored.
-IMPLEMENTED_PHASE = 3
+IMPLEMENTED_PHASE = 4
 SECTIONS_USED = {
     "sim", "navigation", "drone_defaults", "drones", "scenario_events",
     "geofence", "confirmation", "association", "observation", "confidence", "track", "targets",
     "inspection",  # hold / inspection points and the bid's E_insp
-    "network", "heartbeat", "allocation", "safety",
+    "network", "heartbeat", "allocation", "safety", "reacquire", "mission",
 }  # fmt: skip
 
 
@@ -255,6 +255,21 @@ class InspectionConfig:
 
 
 @dataclass(frozen=True)
+class MissionConfig:
+    """How a completed task ends (added in Phase 4; not in PLAN.md section 12).
+
+    neutralize_on_complete: when the owner logs the target, the simulated ground-truth target
+    is marked NEUTRALIZED and produces no more observations (a simulated "engage" mission).
+    False keeps the original inspection semantics: the target stays where it is.
+    """
+
+    neutralize_on_complete: bool = False
+
+    def validate(self, p: str) -> None:
+        pass
+
+
+@dataclass(frozen=True)
 class NavigationConfig:
     cruise_alt: float = 60.0
     arrival_tolerance: float = 5.0
@@ -407,6 +422,7 @@ class Config:
     inspection: InspectionConfig
     navigation: NavigationConfig
     safety: SafetyConfig
+    mission: MissionConfig
     drone_defaults: DroneParams
     drones: list[DroneConfig]
     targets: list[TargetConfig]
@@ -436,6 +452,7 @@ _SECTION_TYPES: dict[str, type] = {
     "inspection": InspectionConfig,
     "navigation": NavigationConfig,
     "safety": SafetyConfig,
+    "mission": MissionConfig,
     "drone_defaults": DroneParams,
 }
 _LIST_SECTIONS = {"drones", "targets", "scenario_events"}

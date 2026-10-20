@@ -26,6 +26,7 @@ class GroundTruthView:
     pos: Point2
     visible: bool
     appeared: bool
+    neutralized: bool = False
 
 
 @dataclass(frozen=True)

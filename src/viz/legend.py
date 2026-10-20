@@ -22,7 +22,8 @@ MODE_STYLE: dict[str, tuple[tuple[int, int, int], str]] = {
     "LANDED": ((150, 150, 150), "LND"),
     "FAILED": ((110, 110, 110), "FAIL"),
 }
-PHASE_MODES = ("PATROL", "CONFIRM_HOLD", "RETURNING", "SAFETY_HOLD", "LANDED", "FAILED")
+PHASE_MODES = ("PATROL", "CONFIRM_HOLD", "ENROUTE", "INSPECTING", "REACQUIRING", "RETURNING", "SAFETY_HOLD",
+               "LANDED", "FAILED")  # fmt: skip
 
 # target state -> (colour, marker, label)
 TARGET_STYLE: dict[str, tuple[tuple[int, int, int], str, str]] = {
@@ -30,14 +31,15 @@ TARGET_STYLE: dict[str, tuple[tuple[int, int, int], str, str]] = {
     "CONFIRMED": ((255, 140, 40), "diamond", "CNF"),
     "ALLOCATED": ((60, 220, 120), "square_open", "ALC"),
     "ENROUTE": ((60, 220, 120), "square", "ENR"),
-    "TRACKING": ((0, 220, 220), "circle", "TRK"),
+    "TRACKING": ((0, 220, 220), "circle", "LOCK"),
     "TRACKING_LOST": ((255, 90, 90), "circle_open", "LOST"),
     "REACQUIRING": ((255, 140, 0), "circle_open", "ACQ"),
     "LOGGED": ((120, 255, 120), "star", "LOG"),
     "COMPLETED": ((120, 255, 120), "star", "DONE"),
     "CANCELLED": ((120, 120, 120), "cross", "CXL"),
 }
-PHASE_TARGET_STATES = ("DETECTED", "CONFIRMED", "ALLOCATED", "CANCELLED")
+PHASE_TARGET_STATES = ("DETECTED", "CONFIRMED", "ALLOCATED", "ENROUTE", "TRACKING", "REACQUIRING", "COMPLETED",
+                       "CANCELLED")  # fmt: skip
 
 # message type -> colour of the flash line / message log entry
 MSG_COLOURS: dict[str, tuple[int, int, int]] = {
@@ -152,10 +154,19 @@ def draw_target_marker(surf: pygame.Surface, x: float, y: float, state: str, siz
         pygame.draw.line(surf, col, (x - s, y + s), (x + s, y - s), 2)
 
 
-def draw_gt_marker(surf: pygame.Surface, x: float, y: float, visible: bool) -> None:
+def draw_gt_marker(surf: pygame.Surface, x: float, y: float, visible: bool, neutralized: bool = False) -> None:
+    """The true target: a crosshair (large, so it is easy to find). Red X once neutralized."""
+    if neutralized:
+        pygame.draw.line(surf, WARN, (x - 12, y - 12), (x + 12, y + 12), 4)
+        pygame.draw.line(surf, WARN, (x - 12, y + 12), (x + 12, y - 12), 4)
+        pygame.draw.circle(surf, WARN, (int(x), int(y)), 16, 2)
+        return
     col = GT if visible else MUTED
-    pygame.draw.line(surf, col, (x - 9, y), (x + 9, y), 1)
-    pygame.draw.line(surf, col, (x, y - 9), (x, y + 9), 1)
+    pygame.draw.circle(surf, col, (int(x), int(y)), 14, 2)
+    pygame.draw.line(surf, col, (x - 20, y), (x - 6, y), 2)
+    pygame.draw.line(surf, col, (x + 6, y), (x + 20, y), 2)
+    pygame.draw.line(surf, col, (x, y - 20), (x, y - 6), 2)
+    pygame.draw.line(surf, col, (x, y + 6), (x, y + 20), 2)
 
 
 def draw_legend(surf: pygame.Surface, font: pygame.font.Font, topleft: tuple[int, int]) -> None:

@@ -26,10 +26,10 @@ def bidder(id="D1", pos=(1300.0, 600.0, 60.0), battery=80.0, params=P, mode="PAT
 
 
 def test_inspection_standoff_matches_confidence_model():
-    # 0.95 * (1 - d/60)^1.5 = 0.6  ->  d = 60 * (1 - (0.6/0.95)^(1/1.5))
+    # aim halfway between min_confidence 0.6 and base 0.95: 0.95 * (1 - d/60)^1.5 = 0.775
     d = inspection_standoff(60, ConfidenceConfig(), InspectionConfig())
-    assert d == pytest.approx(60 * (1 - (0.6 / 0.95) ** (2 / 3)))
-    assert 0.95 * (1 - d / 60) ** 1.5 == pytest.approx(0.6)
+    assert d == pytest.approx(60 * (1 - (0.775 / 0.95) ** (2 / 3)))
+    assert 0.95 * (1 - d / 60) ** 1.5 == pytest.approx(0.775)
     assert inspection_standoff(60, ConfidenceConfig(base=0.5), InspectionConfig()) == 0.0
 
 
