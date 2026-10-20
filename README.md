@@ -82,6 +82,8 @@ centralized baseline, and the SHA-256 of the event log).
 | `L` | show / hide the legend |
 | `Esc` | quit |
 
+The window scales to fit your screen (Windows display scaling is handled) and can be resized or maximised.
+
 None of these touch a drone directly. Each one queues a scenario event that is applied on the
 next tick and logged as `SCENARIO_EVENT` (PLAN.md 4.1 rule 6).
 

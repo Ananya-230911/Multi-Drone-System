@@ -86,9 +86,19 @@ def run_gui(world_factory) -> World:
     from src.viz.panel import Panel
     from src.viz.renderer import MapRenderer, UiState
 
+    if sys.platform == "win32":
+        # Without this, Windows display scaling (125 %, 150 %) blows the window up past the screen edges.
+        try:
+            import ctypes
+
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
     pygame.init()
     pygame.display.set_caption("Multi-drone inspection (simulation)")
-    screen = pygame.display.set_mode(WINDOW)
+    # SCALED: the dashboard is drawn at 1440 x 860 and scaled to fit the screen (mouse clicks are mapped back);
+    # RESIZABLE: the window can be resized or maximised.
+    screen = pygame.display.set_mode(WINDOW, pygame.SCALED | pygame.RESIZABLE)
     fonts = {
         "small": pygame.font.Font(None, 18),
         "normal": pygame.font.Font(None, 22),
