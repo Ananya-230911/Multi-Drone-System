@@ -37,6 +37,35 @@ drone. Everything is simulated: "neutralized" is an event in the simulation, not
 > exercise the decision logic (PLAN.md 7.3). It does not represent the detection accuracy of any
 > real sensor or detector.
 
+## Map version: search any place, click the target
+
+```bash
+python -m src.webmap
+```
+
+This opens a page in your browser with a real **OpenStreetMap** map (Leaflet), a **search box**
+and the same simulation behind it:
+
+1. **Search** a city or address (or type `lat, lon`), and zoom to where you want.
+2. **Set area here**: a 2 km (or 1.5 / 3 km) square appears. The four drones are placed inside it;
+   drag them wherever you like.
+3. **Click map to place target**, then click inside the square.
+4. Optionally **draw a no-fly zone** (two clicks).
+5. Edit each drone's **battery, altitude and sensor radius**. "Fail at" breaks a drone at a given
+   time to show the others taking over.
+6. **Run simulation**, then play it back at 1x to 16x with the slider.
+
+The drones are told where the target is (coordinates only; never counted as proof). They bid,
+agree on one drone, which flies a safe route around the no-fly zone, confirms the target with
+its own sensor, locks on, logs it, and (in "neutralize" mode) the simulated target is marked
+neutralized. The right-hand panel shows the bids and why the winner won, the events, and the
+result; **Download log (CSV)** saves the mission log.
+
+Notes: the map pictures and the search need an internet connection (they come from
+OpenStreetMap, shown with its required credit); Leaflet itself is bundled, and the simulation runs
+on your own computer only (the server listens on `127.0.0.1`). Everything is simulation. Use
+`--port N` to change the port and `--no-browser` to skip opening the browser.
+
 ## Install
 
 Python 3.11 or newer.
@@ -152,6 +181,7 @@ src/drone/mission.py        the owner's mission: route, lock, inspect, log, reac
 src/logging_/target_log.py  per-agent logbooks merged into target_log.csv
 src/logging_/event_log.py   JSON Lines event log (canonical, hashable)
 src/viz/                    snapshot, map renderer, side panel, legend
+src/webmap/                 browser map: Leaflet page, scenario builder, runner, local server
 tests/unit/                 algorithm tests (no world, no pygame)
 tests/sim/                  headless scenario tests per phase
 ```

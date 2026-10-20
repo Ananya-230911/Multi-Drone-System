@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone map simulation</title>
+<link rel="stylesheet" href="/static/vendor/leaflet.css">
+<style>
+  :root { --bg:#12141a; --panel:#1c2029; --panel2:#252a36; --line:#343b4a; --text:#e4e7ee; --muted:#8d95a8;
+          --accent:#46a0ff; --good:#78e68c; --warn:#ff5a5a; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--text);
+               font:14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { display:grid; grid-template-columns: 350px 1fr; height:100%; }
+  #side { background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding:12px 14px 40px; }
+  #mapwrap { position:relative; }
+  #map { position:absolute; inset:0; background:#aab; }
+  h1 { font-size:17px; margin:2px 0 2px; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:10px; }
+  .step { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:10px; margin:10px 0; }
+  .step h2 { font-size:13px; margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+  .n { background:var(--accent); color:#06121f; border-radius:50%; width:20px; height:20px; display:inline-flex;
+       align-items:center; justify-content:center; font-weight:700; font-size:12px; }
+  select { max-width:100%; }
+  .row > select { flex:1; min-width:0; }
+  input, select, button { font:inherit; color:var(--text); background:#12161e; border:1px solid var(--line);
+                          border-radius:6px; padding:6px 8px; }
+  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  button { cursor:pointer; background:#2a3140; }
+  button:hover:not(:disabled) { background:#343d50; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:var(--accent); color:#06121f; border-color:var(--accent); font-weight:700; }
+  button.primary:hover:not(:disabled) { background:#6bb4ff; }
+  button.on { outline:2px solid var(--good); }
+  .row { display:flex; gap:6px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  .row > input[type=text] { flex:1; min-width:0; }
+  .hint { color:var(--muted); font-size:12px; margin:4px 0; }
+  #results button { display:block; width:100%; text-align:left; margin:3px 0; font-size:12px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th { color:var(--muted); font-weight:500; text-align:left; padding:2px 3px; }
+  td { padding:2px 3px; }
+  td input { width:100%; padding:3px 4px; }
+  #status { margin:8px 0; padding:8px; border-radius:6px; font-size:12.5px; display:none; }
+  #status.err { display:block; background:#3a1d22; border:1px solid var(--warn); color:#ffc9c9; }
+  #status.ok { display:block; background:#1d3326; border:1px solid var(--good); color:#cdf5d6; }
+  #status.busy { display:block; background:#22304a; border:1px solid var(--accent); }
+
+  /* map overlays */
+  .dm { transform:translate(-50%,-50%); text-align:center; font-weight:700; font-size:11px; color:#fff;
+        text-shadow:0 0 3px #000, 0 0 3px #000; pointer-events:auto; }
+  .dm .dot { width:22px; height:22px; border-radius:50%; background:var(--c); border:2px solid #fff; margin:0 auto;
+             display:flex; align-items:center; justify-content:center; box-shadow:0 0 6px rgba(0,0,0,.6); }
+  .dm .md { display:block; margin-top:1px; font-size:10px; white-space:nowrap; }
+  .tg { transform:translate(-50%,-50%); }
+  #panel { position:absolute; top:10px; right:10px; width:400px; max-height:calc(100% - 100px); overflow-y:auto; z-index:1000;
+           background:rgba(20,23,31,.94); border:1px solid var(--line); border-radius:10px; padding:10px 12px;
+           display:none; font-size:12.5px; }
+  #panel h3 { margin:10px 0 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  #panel h3:first-child { margin-top:0; }
+  #panel table td, #panel table th { padding:2px 4px; }
+  .win { color:var(--good); font-weight:700; }
+  .no { color:var(--muted); }
+  #events div { padding:1px 0; border-bottom:1px solid #262c38; }
+  #events .t { color:var(--muted); display:inline-block; width:46px; }
+  #bar { position:absolute; left:10px; right:10px; bottom:10px; z-index:1000; display:none; gap:8px; align-items:center;
+         background:rgba(20,23,31,.94); border:1px solid var(--line); border-radius:10px; padding:8px 12px; }
+  #bar input[type=range] { flex:1; padding:0; }
+  #banner { position:absolute; left:50%; top:12px; transform:translateX(-50%); z-index:1100; display:none;
+            background:#78e68c; color:#10261a; font-weight:800; padding:8px 18px; border-radius:8px; font-size:15px; }
+  #banner.warn { background:#ffb86b; color:#2a1a05; }
+  .bar { height:7px; background:#343b4a; border-radius:4px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--good); }
+  .mono { font-family:ui-monospace, Consolas, monospace; }
+  @media (max-width: 900px) { #app { grid-template-columns: 1fr; grid-template-rows: auto 60vh; } #panel { width:70%; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Drone coordination on a map</h1>
+    <div class="sub">Simulation only. Pick a place, mark the target; the drones agree among themselves who goes.</div>
+
+    <div class="step">
+      <h2><span class="n">1</span> Find a place</h2>
+      <form id="searchform" class="row">
+        <input id="q" type="text" placeholder="City, address, or  lat, lon" autocomplete="off">
+        <button class="primary" type="submit">Search</button>
+      </form>
+      <div id="results"></div>
+      <div class="hint">Search uses OpenStreetMap (internet needed). You can also type coordinates like <span class="mono">48.85, 2.35</span>.</div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">2</span> Operating area</h2>
+      <div class="row">
+        <select id="size">
+          <option value="1500">1.5 km square</option>
+          <option value="2000" selected>2 km square</option>
+          <option value="3000">3 km square</option>
+        </select>
+        <button id="setarea">Set area here</button>
+      </div>
+      <div class="hint">Zoom to where you want it, then click. The rectangle is the area the drones may fly in. The four drones appear inside it: <b>drag them</b> to move them.</div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">3</span> Target</h2>
+      <div class="row">
+        <button id="placetarget" disabled>Click map to place target</button>
+        <span id="tinfo" class="hint"></span>
+      </div>
+      <div class="row">
+        <select id="mode">
+          <option value="neutralize" selected>Locate, lock, log and neutralize (simulated)</option>
+          <option value="inspect">Locate, lock and log only</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">4</span> No-fly zone <span class="hint">(optional)</span></h2>
+      <div class="row">
+        <button id="placezone" disabled>Draw zone (2 clicks)</button>
+        <button id="clearzone" disabled>Clear</button>
+      </div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">5</span> Drone parameters</h2>
+      <table id="dtable"><thead><tr><th></th><th>Battery %</th><th>Alt m</th><th>Sensor m</th><th>Fail at s</th></tr></thead><tbody></tbody></table>
+      <div class="hint">Sensor reach on the ground = smaller of <i>sensor radius</i> and <i>altitude</i> (45&deg; view). A drone that lacks battery for the round trip cannot be chosen. "Fail at" breaks that drone at the given time to show the others taking over.</div>
+    </div>
+
+    <button id="run" class="primary" style="width:100%;padding:10px" disabled>Run simulation</button>
+    <div id="status"></div>
+    <div class="hint" style="margin-top:14px">Map &copy; OpenStreetMap contributors. Everything here is a simulation; nothing is connected to a real vehicle.</div>
+  </div>
+
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="banner"></div>
+    <div id="panel"></div>
+    <div id="bar">
+      <button id="play">Play</button>
+      <button id="restart" title="Back to the start">&#8634;</button>
+      <input id="scrub" type="range" min="0" max="1000" value="0">
+      <span id="clock" class="mono" style="min-width:92px;text-align:right">0.0 s</span>
+      <select id="speed">
+        <option value="1">1x</option><option value="2">2x</option><option value="4" selected>4x</option>
+        <option value="8">8x</option><option value="16">16x</option>
+      </select>
+      <button id="edit">Edit setup</button>
+      <button id="csv">Download log (CSV)</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/leaflet.js"></script>
+<script>
+"use strict";
+const MODE_COLOURS = {PATROL:"#46a0ff", CONFIRM_HOLD:"#ffc83c", ENROUTE:"#3cdc78", INSPECTING:"#00c8c8", REACQUIRING:"#ff8c00",
+                      RETURNING:"#be78ff", SAFETY_HOLD:"#ff5050", LANDED:"#969696", FAILED:"#6e6e6e"};
+const MODE_SHORT = {PATROL:"patrol", CONFIRM_HOLD:"checking", ENROUTE:"en route", INSPECTING:"LOCKED", REACQUIRING:"searching",
+                    RETURNING:"returning", SAFETY_HOLD:"holding", LANDED:"landed", FAILED:"FAILED"};
+const M_PER_DEG = 111320;
+const DEFAULTS = [  // offsets from the area centre in metres at 2 km (scaled with the area), then parameters
+  {id:"D1", dx:-550, dy: 450, alt:60, battery:85, radius:80},
+  {id:"D2", dx: 500, dy: 350, alt:90, battery:70, radius:80},
+  {id:"D3", dx:-300, dy:-500, alt:60, battery:30, radius:80},
+  {id:"D4", dx: 450, dy:-450, alt:60, battery:95, radius:40},
+];
+const $ = id => document.getElementById(id);
+const map = L.map("map", {zoomControl:true}).setView([20, 0], 2);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:19,
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
+L.control.scale({metric:true, imperial:false}).addTo(map);
+
+const S = {size:2000, centre:null, rect:null, drones:[], target:null, tmarker:null, picking:null, zcorners:[], zrect:null,
+           result:null, view:null};
+
+function offset(lat0, lon0, dx, dy) {
+  return [lat0 + dy / M_PER_DEG, lon0 + dx / (M_PER_DEG * Math.cos(lat0 * Math.PI / 180))];
+}
+function say(kind, msg) { const s = $("status"); s.className = kind; s.textContent = msg; s.style.display = kind ? "block" : "none"; }
+function mkIcon(label, colour, mode) {
+  return L.divIcon({className:"", iconSize:[0,0], html:`<div class="dm" style="--c:${colour}"><div class="dot">${label.slice(1)}</div>` +
+    `<span class="md">${label}${mode ? " · " + mode : ""}</span></div>`});
+}
+const targetIcon = L.divIcon({className:"", iconSize:[0,0], html:
+  `<div class="tg"><svg width="44" height="44" viewBox="-22 -22 44 44"><circle r="13" fill="none" stroke="#ff4d4d" stroke-width="3"/>` +
+  `<path d="M-21 0H-7M7 0H21M0 -21V-7M0 7V21" stroke="#ff4d4d" stroke-width="3"/></svg></div>`});
+const deadIcon = L.divIcon({className:"", iconSize:[0,0], html:
+  `<div class="tg"><svg width="48" height="48" viewBox="-24 -24 48 48"><circle r="17" fill="rgba(0,0,0,.45)" stroke="#ff4d4d" stroke-width="3"/>` +
+  `<path d="M-11 -11L11 11M11 -11L-11 11" stroke="#ff4d4d" stroke-width="5"/></svg></div>`});
+
+/* ------------------------------------------------------------------ 1. search */
+async function search(q) {
+  const box = $("results"); box.textContent = "";
+  const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (m) { map.setView([+m[1], +m[2]], 15); return; }
+  say("busy", "Searching...");
+  try {
+    const r = await fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=" + encodeURIComponent(q), {headers:{"Accept":"application/json"}});
+    if (!r.ok) throw new Error("search service answered " + r.status);
+    const list = await r.json();
+    say("", "");
+    if (!list.length) { box.innerHTML = '<div class="hint">No place found. Try another spelling.</div>'; return; }
+    list.forEach(p => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = p.display_name;
+      b.onclick = () => { map.fitBounds([[+p.boundingbox[0], +p.boundingbox[2]], [+p.boundingbox[1], +p.boundingbox[3]]], {maxZoom:16}); box.textContent = ""; };
+      box.appendChild(b);
+    });
+    if (list.length === 1) box.firstChild.click();
+  } catch (e) { say("err", "Search failed (" + e.message + "). Check your internet connection, or type coordinates like 48.85, 2.35."); }
+}
+$("searchform").onsubmit = ev => { ev.preventDefault(); const q = $("q").value.trim(); if (q) search(q); };
+
+/* ------------------------------------------------------------------ 2. area and drones */
+function setArea() {
+  clearPlayback(); S.size = +$("size").value; S.centre = map.getCenter();
+  const c = S.centre, [la1, lo1] = offset(c.lat, c.lng, -S.size / 2, -S.size / 2), [la2, lo2] = offset(c.lat, c.lng, S.size / 2, S.size / 2);
+  if (S.rect) S.rect.remove();
+  S.rect = L.rectangle([[la1, lo1], [la2, lo2]], {color:"#46a0ff", weight:2, fillOpacity:.04, interactive:false}).addTo(map);
+  map.fitBounds(S.rect.getBounds(), {padding:[30, 30]});
+  S.drones.forEach(d => d.marker.remove()); S.drones = [];
+  DEFAULTS.forEach(def => {
+    const k = S.size / 2000, [la, lo] = offset(c.lat, c.lng, def.dx * k, def.dy * k);
+    const d = {id:def.id, lat:la, lon:lo, alt:def.alt, battery:def.battery, radius:def.radius, failAt:""};
+    d.marker = L.marker([la, lo], {draggable:true, icon:mkIcon(d.id, MODE_COLOURS.PATROL, ""), zIndexOffset:500}).addTo(map);
+    d.marker.on("dragend", () => { const p = d.marker.getLatLng(); d.lat = p.lat; d.lon = p.lng; });
+    S.drones.push(d);
+  });
+  S.target = null; if (S.tmarker) { S.tmarker.remove(); S.tmarker = null; } $("tinfo").textContent = "";
+  clearZone(); drawTable();
+  ["placetarget", "placezone"].forEach(i => $(i).disabled = false); updateRun();
+  say("ok", "Area set. Drag the drones if you like, then place the target.");
+}
+$("setarea").onclick = setArea;
+
+function drawTable() {
+  const tb = $("dtable").querySelector("tbody"); tb.textContent = "";
+  S.drones.forEach(d => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><b style="color:#fff">${d.id}</b></td>` +
+      `<td><input type="number" min="5" max="100" step="1" value="${d.battery}" data-k="battery"></td>` +
+      `<td><input type="number" min="30" max="110" step="5" value="${d.alt}" data-k="alt"></td>` +
+      `<td><input type="number" min="20" max="200" step="5" value="${d.radius}" data-k="radius"></td>` +
+      `<td><input type="number" min="1" max="600" step="1" value="${d.failAt}" data-k="failAt" placeholder="-"></td>`;
+    tr.querySelectorAll("input").forEach(inp => inp.oninput = () => { d[inp.dataset.k] = inp.value === "" ? "" : +inp.value; });
+    tb.appendChild(tr);
+  });
+}
+
+/* ------------------------------------------------------------------ 3-4. target and zone */
+function pick(kind) {
+  S.picking = S.picking === kind ? null : kind; S.zcorners = [];
+  $("placetarget").classList.toggle("on", S.picking === "target"); $("placezone").classList.toggle("on", S.picking === "zone");
+  map.getContainer().style.cursor = S.picking ? "crosshair" : "";
+}
+$("placetarget").onclick = () => pick("target");
+$("placezone").onclick = () => pick("zone");
+function clearZone() { if (S.zrect) S.zrect.remove(); S.zrect = null; S.zpoints = null; $("clearzone").disabled = true; }
+$("clearzone").onclick = clearZone;
+map.on("click", ev => {
+  if (!S.picking || !S.rect) return;
+  if (!S.rect.getBounds().contains(ev.latlng)) { say("err", "Click inside the blue rectangle (the operating area)."); return; }
+  say("", "");
+  if (S.picking === "target") {
+    S.target = {lat:ev.latlng.lat, lon:ev.latlng.lng};
+    if (S.tmarker) S.tmarker.remove();
+    S.tmarker = L.marker(ev.latlng, {icon:targetIcon, interactive:false}).addTo(map);
+    $("tinfo").textContent = ev.latlng.lat.toFixed(5) + ", " + ev.latlng.lng.toFixed(5); pick(null); updateRun();
+  } else {
+    S.zcorners.push(ev.latlng);
+    if (S.zcorners.length === 2) {
+      clearZone(); S.zpoints = S.zcorners.map(p => ({lat:p.lat, lon:p.lng}));
+      S.zrect = L.rectangle(S.zcorners, {color:"#ff5a5a", weight:2, fillOpacity:.25, dashArray:"6 4", interactive:false}).addTo(map);
+      $("clearzone").disabled = false; pick(null);
+    }
+  }
+});
+function updateRun() { $("run").disabled = !(S.rect && S.target); }
+
+/* ------------------------------------------------------------------ run */
+$("run").onclick = async () => {
+  const req = {center:{lat:S.centre.lat, lon:S.centre.lng}, size_m:S.size, target:S.target, mode:$("mode").value,
+    zones:S.zpoints ? [{corners:S.zpoints}] : [],
+    drones:S.drones.map(d => ({id:d.id, lat:d.lat, lon:d.lon, alt:d.alt, battery_pct:d.battery / 100, sensor_radius:d.radius,
+                               ...(d.failAt !== "" ? {fail_at:d.failAt} : {})}))};
+  say("busy", "Simulating..."); $("run").disabled = true;
+  try {
+    const r = await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(req)});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || ("server answered " + r.status));
+    say("", ""); startPlayback(data);
+  } catch (e) { say("err", String(e.message || e)); }
+  updateRun();
+};
+
+/* ------------------------------------------------------------------ playback */
+const P = {frames:[], t:0, playing:false, idx:0, layers:null, last:0, lastIdx:-1};
+function clearPlayback() {
+  const wasPlaying = !!P.layers; P.playing = false;
+  if (wasPlaying && S.rect) map.fitBounds(S.rect.getBounds(), {padding:[30, 30]});
+  if (P.layers) { P.layers.all.forEach(l => l.remove()); P.layers = null; }
+  S.result = null; $("panel").style.display = "none"; $("bar").style.display = "none"; $("banner").style.display = "none";
+  S.drones.forEach(d => { d.marker.setLatLng([d.lat, d.lon]); d.marker.setIcon(mkIcon(d.id, MODE_COLOURS.PATROL, "")); d.marker.dragging && d.marker.dragging.enable(); });
+  if (S.tmarker) { S.tmarker.setIcon(targetIcon); }
+}
+function startPlayback(res) {
+  clearPlayback(); S.result = res; P.frames = res.frames; P.t = 0; P.lastIdx = -1; P.idx = 0;
+  const all = [];
+  const L_ = {foot:[], trail:[], all};
+  S.drones.forEach((d, i) => {
+    d.marker.dragging.disable();
+    const foot = L.circle([d.lat, d.lon], {radius:1, color:"#46a0ff", weight:1, fillOpacity:.12, interactive:false}).addTo(map);
+    const trail = L.polyline([], {color:"#46a0ff", weight:2, opacity:.8, interactive:false}).addTo(map);
+    L_.foot.push(foot); L_.trail.push(trail); all.push(foot, trail);
+  });
+  L_.lock = L.polyline([], {color:"#ff4d4d", weight:3, dashArray:"8 6", interactive:false}).addTo(map); all.push(L_.lock);
+  L_.route = L.polyline([], {color:"#ffe066", weight:3, opacity:.9, interactive:false}).addTo(map); all.push(L_.route);
+  P.layers = L_;
+  map.fitBounds(S.rect.getBounds(), {paddingTopLeft:[30, 60], paddingBottomRight:[440, 80]});  // leave room for the panel
+  $("bar").style.display = "flex"; $("panel").style.display = "block"; $("scrub").max = Math.round(res.t_end * 10);
+  P.playing = true; $("play").textContent = "Pause"; P.last = performance.now(); requestAnimationFrame(tick);
+  render(true);
+}
+function frameAt(t) {
+  const f = P.frames; let lo = 0, hi = f.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (f[mid].t <= t) lo = mid; else hi = mid - 1; }
+  return lo;
+}
+function tick(now) {
+  if (!P.layers) return;
+  if (P.playing) {
+    P.t += (now - P.last) / 1000 * +$("speed").value; P.last = now;
+    if (P.t >= S.result.t_end) { P.t = S.result.t_end; P.playing = false; $("play").textContent = "Play"; }
+    render(false);
+  }
+  P.last = now; requestAnimationFrame(tick);
+}
+function render(force) {
+  const R = S.result, F = P.frames, i = frameAt(P.t), f0 = F[i], f1 = F[Math.min(i + 1, F.length - 1)];
+  const u = f1.t > f0.t ? Math.min(1, Math.max(0, (P.t - f0.t) / (f1.t - f0.t))) : 0;
+  const changed = i !== P.lastIdx || force; P.lastIdx = i;
+  S.drones.forEach((d, k) => {
+    const a = f0.d[k], b = f1.d[k], lat = a[0] + (b[0] - a[0]) * u, lon = a[1] + (b[1] - a[1]) * u, mode = R.modes[a[3]];
+    d.marker.setLatLng([lat, lon]); P.layers.foot[k].setLatLng([lat, lon]); P.layers.foot[k].setRadius(Math.max(a[5], 1));
+    const col = MODE_COLOURS[mode];
+    P.layers.foot[k].setStyle({color:col, fillColor:col, opacity: a[5] > 0 ? .8 : 0, fillOpacity: a[5] > 0 ? .12 : 0});
+    P.layers.trail[k].setStyle({color:col});
+    if (changed) { d.marker.setIcon(mkIcon(d.id, col, a[6] ? "parked" : MODE_SHORT[mode]));
+      P.layers.trail[k].setLatLngs(F.slice(0, i + 1).map(f => [f.d[k][0], f.d[k][1]]).concat([[lat, lon]])); }
+  });
+  const ownerIdx = f0.owner ? S.drones.findIndex(d => d.id === f0.owner) : -1;
+  const tstate = R.target_states[f0.ts];
+  if (ownerIdx >= 0 && ["ENROUTE", "TRACKING", "TRACKING_LOST", "REACQUIRING", "ALLOCATED"].includes(tstate)) {
+    const dd = S.drones[ownerIdx].marker.getLatLng();
+    P.layers.lock.setLatLngs([dd, [R.target.lat, R.target.lon]]);
+    P.layers.lock.setStyle({dashArray: tstate === "TRACKING" ? null : "8 6", weight: tstate === "TRACKING" ? 4 : 2});
+  } else P.layers.lock.setLatLngs([]);
+  const route = [...R.routes].reverse().find(r => r.t <= P.t && r.kind === "mission" && r.actor === f0.owner);
+  P.layers.route.setLatLngs(route && tstate !== "COMPLETED" && tstate !== "CANCELLED" ? route.points : []);
+  S.tmarker.setIcon(f0.neutralized ? deadIcon : targetIcon);
+  $("scrub").value = Math.round(P.t * 10); $("clock").textContent = P.t.toFixed(1) + " / " + R.t_end.toFixed(0) + " s";
+  const bn = $("banner"), done = R.events.find(e => e.type === "TARGET_NEUTRALIZED" && e.t <= P.t);
+  const logged = R.events.find(e => e.type === "TARGET_LOGGED" && e.t <= P.t);
+  const cancelled = R.events.find(e => (e.type === "TASK_CANCELLED" || e.type === "ALLOCATION_FAILED") && e.t <= P.t);
+  if (done) { bn.className = ""; bn.textContent = "MISSION COMPLETE: target neutralized by " + done.text.match(/by (\w+)/)[1]; bn.style.display = "block"; }
+  else if (logged) { bn.className = ""; bn.textContent = "TARGET LOGGED by " + logged.actor; bn.style.display = "block"; }
+  else if (cancelled) { bn.className = "warn"; bn.textContent = "TASK CANCELLED: " + cancelled.text.replace(/^\s*[\d.]+\s*/, ""); bn.style.display = "block"; }
+  else bn.style.display = "none";
+  if (changed) renderPanel(f0, i);
+}
+function renderPanel(f, i) {
+  const R = S.result, t = P.t;
+  let h = "<h3>Drones</h3><table><tr><th></th><th>mode</th><th>battery</th><th>alt</th></tr>";
+  S.drones.forEach((d, k) => {
+    const a = f.d[k], mode = R.modes[a[3]], pct = Math.round(a[4] * 100);
+    h += `<tr><td><b style="color:${MODE_COLOURS[mode]}">${d.id}</b></td><td>${a[6] ? "parked home" : MODE_SHORT[mode]}${f.owner === d.id ? " (owner)" : ""}</td>` +
+         `<td><div class="bar" style="width:70px;display:inline-block;vertical-align:middle"><i style="width:${pct}%;background:${pct < 20 ? "#ff5a5a" : "#78e68c"}"></i></div> ${pct}%</td><td>${Math.round(a[2])} m</td></tr>`;
+  });
+  h += "</table><h3>Target</h3>" + R.target_states[f.ts].replace("_", " ") +
+       (f.owner ? ` &middot; owner <b>${f.owner}</b>` : "") + (f.lock !== null ? ` &middot; lock <b>${f.lock.toFixed(1)}</b> s` : "") +
+       (f.neutralized ? ' &middot; <b style="color:#ff6b6b">NEUTRALIZED</b>' : "");
+  const al = [...R.allocations].reverse().find(a => a.t <= t);
+  if (al) {
+    const done = al.committed_at !== null && al.committed_at <= t;
+    h += `<h3>Bids &middot; round ${al.epoch}${done ? "" : " (deciding...)"}</h3><table><tr><th></th><th>reach</th><th>route</th><th>batt after</th><th>cost</th><th></th></tr>`;
+    al.bids.forEach(b => {
+      const win = done && b.drone === al.winner;
+      h += b.feasible
+        ? `<tr class="${win ? "win" : ""}"><td>${b.drone}</td><td>${b.t_go.toFixed(0)} s</td><td>${b.L_go.toFixed(0)} m</td><td>${b.batt_after.toFixed(0)} Wh</td><td>${b.cost.toFixed(1)}</td><td>${win ? "WINNER" : ""}</td></tr>`
+        : `<tr class="no"><td>${b.drone}</td><td colspan="5">cannot go: ${b.reason.replace(/_/g, " ")}${b.batt_after !== null && b.reason === "insufficient_energy" ? ` (would have ${b.batt_after.toFixed(0)} Wh left, reserve ${b.reserve_wh.toFixed(0)})` : ""}</td></tr>`;
+    });
+    h += "</table>";
+    if (done) {
+      const w = al.bids.find(b => b.drone === al.winner), others = al.bids.filter(b => b.drone !== al.winner);
+      if (w) h += `<div class="hint">Why ${w.drone}: lowest cost (${w.cost.toFixed(1)}), ${w.t_go.toFixed(0)} s to reach, ${w.batt_after.toFixed(0)} Wh left after the trip. Others: ` +
+        others.map(b => b.feasible ? `${b.drone} ${b.cost.toFixed(1)}` : `${b.drone} can't (${b.reason.replace(/_/g, " ")})`).join(", ") + ".</div>";
+    }
+  }
+  h += '<h3>Events</h3><div id="events">';
+  R.events.filter(e => e.t <= t).slice(-14).reverse().forEach(e => { h += `<div><span class="t mono">${e.t.toFixed(1)}</span>${e.text.replace(/^\s*[\d.]+\s*/, "").replace(/</g, "&lt;")}</div>`; });
+  h += "</div>";
+  if (t >= R.t_end - 0.01) {
+    const s = R.summary, row = s.target_log[0];
+    h += "<h3>Result</h3>";
+    if (row) h += `<div>Final state <b>${row.final_state}</b>${row.owner ? ", owner <b>" + row.owner + "</b>" : ""}` +
+      (row.logged_at != null ? `, logged at ${row.logged_at.toFixed(1)} s after ${row.inspection_duration.toFixed(0)} s of lock` : "") +
+      (row.cancel_reason ? `, reason: ${row.cancel_reason.replace(/_/g, " ")}` : "") + `.</div>`;
+    h += `<div class="hint">Matches the best possible choice: ${s.baseline_match.length ? (s.baseline_match.every(Boolean) ? "yes" : "no") : "n/a"}. ` +
+         `Safety violations: geofence ${s.geofence_violations}, separation ${s.separation_violations}. Messages: ${s.messages.sent} sent, ${s.messages.dropped} lost.</div>`;
+  }
+  $("panel").innerHTML = h;
+}
+$("play").onclick = () => { if (!P.layers) return; if (P.t >= S.result.t_end) P.t = 0; P.playing = !P.playing; $("play").textContent = P.playing ? "Pause" : "Play"; P.last = performance.now(); };
+$("restart").onclick = () => { P.t = 0; P.lastIdx = -1; render(true); };
+$("scrub").oninput = ev => { P.t = +ev.target.value / 10; P.lastIdx = -1; render(true); };
+$("edit").onclick = () => { clearPlayback(); say("ok", "Setup unlocked. Change anything and run again."); updateRun(); };
+$("csv").onclick = () => {
+  if (!S.result) return;
+  const rows = S.result.summary.target_log; if (!rows.length) return;
+  const keys = Object.keys(rows[0]);
+  const csv = [keys.join(","), ...rows.map(r => keys.map(k => r[k] === null ? "" : r[k]).join(","))].join("\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"})); a.download = "mission_log.csv"; a.click();
+};
+document.addEventListener("keydown", ev => { if (ev.code === "Space" && P.layers && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { ev.preventDefault(); $("play").click(); } });
+</script>
+</body>
+</html>
