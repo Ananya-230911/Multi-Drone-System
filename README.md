@@ -46,10 +46,14 @@ python -m src.webmap
 This opens a page in your browser with a real **OpenStreetMap** map (Leaflet), a **search box**
 and the same simulation behind it:
 
-1. **Search** a city or address (or type `lat, lon`), and zoom to where you want.
-2. **Set area here**: a 2 km (or 1.5 / 3 km) square appears. The four drones are placed inside it;
-   drag them wherever you like.
-3. **Click map to place target**, then click inside the square.
+1. **Search** a place (or type exact `lat, lon`). The map goes to the first match and drops a pin on
+   it; every result lists its coordinates so you can pick the right city.
+2. **Set the operating area (the geofence)**: type a width and a height (0.8 to 12 km each) and
+   press the first button, which centres it where the **+** is, or press **Draw by 2 corners** and
+   click two opposite corners. The area is the only place the drones may fly; they never leave it.
+   The four drones appear inside it; drag them where you like.
+3. **Place the target** by clicking inside the area (zoom in first for a more exact spot; the page
+   shows the precision), or type its exact `lat, lon` and press **Set**.
 4. Optionally **draw a no-fly zone** (two clicks).
 5. Edit each drone's **battery, altitude and sensor radius**. "Fail at" breaks a drone at a given
    time to show the others taking over.
@@ -57,8 +61,8 @@ and the same simulation behind it:
 
 The drones are told where the target is (coordinates only; never counted as proof). They bid,
 agree on one drone, which flies a safe route around the no-fly zone, confirms the target with
-its own sensor, locks on, logs it, and (in "neutralize" mode) the simulated target is marked
-neutralized. The right-hand panel shows the bids and why the winner won, the events, and the
+its own sensor, locks on (the target's marker pulses), logs it, and (in "neutralize" mode) the
+simulated target is destroyed: a burst animation plays on the map and a scorched crater is left. The right-hand panel shows the bids and why the winner won, the events, and the
 result; **Download log (CSV)** saves the mission log.
 
 Notes: the map pictures and the search need an internet connection (they come from

@@ -1,8 +1,9 @@
 """Turn a web-map request into a validated simulation `Config`.
 
 Request (JSON) fields:
-    center      {lat, lon}   centre of the operating area
-    size_m      side of the square operating area in metres (1000 to 4000)
+    bounds      {south, west, north, east}   the operating area (geofence) as a rectangle, degrees;
+                each side 800 m to 12 km
+    center, size_m   alternative to `bounds`: a square of size_m metres (800 to 12000) around `center`
     target      {lat, lon}   where the target is
     zones       [{id?, corners: [{lat, lon}, {lat, lon}]}]   optional no-fly rectangles
     drones      [{id, lat, lon, alt, battery_pct, sensor_radius, fail_at?}]   2 to 6 drones
@@ -23,6 +24,8 @@ from typing import Any
 from src.config import Config, ConfigError, config_from_dict
 from src.webmap.geo import GeoFrame
 
+MIN_SIDE, MAX_SIDE = 800.0, 12_000.0  # metres, each side of the operating area
+CRUISE_SPEED = 15.0  # m/s, only used to size the default simulation length
 EDGE_CLEARANCE = 120.0  # metres from the area edge: boundary inset + margin + patrol loop
 PATROL_HALF = 40.0  # half side of each drone's small holding loop, metres
 MAX_DRONES = 6
@@ -51,19 +54,35 @@ def _point(obj: Any, what: str) -> tuple[float, float]:
 
 
 def frame_of(req: dict) -> GeoFrame:
-    lat, lon = _point(req.get("center"), "operating area centre")
-    return GeoFrame(lat, lon, _num(req, "size_m", 1000.0, 4000.0, "operating area"))
+    b = req.get("bounds")
+    if b is not None:
+        if not isinstance(b, dict):
+            raise RequestError("operating area bounds are malformed")
+        s, n = _num(b, "south", -85.0, 85.0, "operating area"), _num(b, "north", -85.0, 85.0, "operating area")
+        w, e = _num(b, "west", -180.0, 180.0, "operating area"), _num(b, "east", -180.0, 180.0, "operating area")
+        if not (s < n and w < e):
+            raise RequestError("operating area: south must be below north and west left of east")
+        fr = GeoFrame.from_bounds(s, w, n, e)
+    else:
+        lat, lon = _point(req.get("center"), "operating area centre")
+        fr = GeoFrame(lat, lon, _num(req, "size_m", MIN_SIDE, MAX_SIDE, "operating area"))
+    for side, name in ((fr.width, "width"), (fr.h, "height")):
+        if not MIN_SIDE <= side <= MAX_SIDE:
+            raise RequestError(f"operating area {name} is {side / 1000:.1f} km; it must be between "
+                               f"{MIN_SIDE / 1000:.1f} and {MAX_SIDE / 1000:.0f} km")  # fmt: skip
+    return fr
 
 
 def build_dict(req: dict) -> tuple[dict[str, Any], GeoFrame]:
     if not isinstance(req, dict):
         raise RequestError("request must be a JSON object")
     fr = frame_of(req)
-    size = fr.size
-    inside = lambda x, y: EDGE_CLEARANCE <= x <= size - EDGE_CLEARANCE and EDGE_CLEARANCE <= y <= size - EDGE_CLEARANCE  # noqa: E731
+    width, height = fr.width, fr.h
+    inside = lambda x, y: (EDGE_CLEARANCE <= x <= width - EDGE_CLEARANCE  # noqa: E731
+                           and EDGE_CLEARANCE <= y <= height - EDGE_CLEARANCE)  # fmt: skip
 
     tx, ty = fr.to_xy(*_point(req.get("target"), "target"))
-    if not (20.0 <= tx <= size - 20.0 and 20.0 <= ty <= size - 20.0):
+    if not (20.0 <= tx <= width - 20.0 and 20.0 <= ty <= height - 20.0):
         raise RequestError("the target is outside the operating area (or too close to its edge)")
 
     drones_in = req.get("drones")
@@ -109,19 +128,23 @@ def build_dict(req: dict) -> tuple[dict[str, Any], GeoFrame]:
     mode = req.get("mode", "neutralize")
     if mode not in ("neutralize", "inspect"):
         raise RequestError("mode must be 'neutralize' or 'inspect'")
-    duration = _num(req, "duration", 30.0, 600.0, "simulation") if "duration" in req else 300.0
+    diag = (width ** 2 + height ** 2) ** 0.5
+    # Long enough for the farthest drone to fly there, lock on and fly home, with a margin.
+    auto = min(2400.0, max(300.0, 2.5 * diag / CRUISE_SPEED + 90.0))
+    duration = _num(req, "duration", 30.0, 3600.0, "simulation") if "duration" in req else auto
+    comm = max(1500.0, diag * 1.1)  # the radio covers the whole area
     seed = int(_num(req, "seed", 0, 2**31 - 1, "simulation")) if "seed" in req else 7
 
     cfg = {
-        "sim": {"duration": duration, "seed": seed, "map_size": [size, size]},
+        "sim": {"duration": duration, "seed": seed, "map_size": [width, height]},
         "mission": {"neutralize_on_complete": mode == "neutralize"},
         "geofence": {
-            "boundary": [[20, 20], [size - 20, 20], [size - 20, size - 20], [20, size - 20]],
+            "boundary": [[20, 20], [width - 20, 20], [width - 20, height - 20], [20, height - 20]],
             "margin": 15, "altitude_limits": [15, 120], "restricted_zones": zones,
         },  # fmt: skip
-        "network": {"comm_range": max(1500.0, size * 1.5)},
+        "network": {"comm_range": comm},
         "association": {"ignore_after_complete": 400},
-        "drone_defaults": {"comm_range": max(1500.0, size * 1.5)},
+        "drone_defaults": {"comm_range": comm},
         "drones": drones,
         "targets": [{"id": "TARGET", "pos": [round(tx, 2), round(ty, 2)], "alt": 0, "appear_at": 0}],
         "scenario_events": [{"t": 5, "type": "external_cue", "pos": [round(tx, 2), round(ty, 2)]}] + fail_events,

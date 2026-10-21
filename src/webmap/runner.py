@@ -81,6 +81,7 @@ def run(req: dict) -> dict[str, Any]:
         "routes": _routes(w, fr),
         "zones": [[list(fr.to_latlon(*p)) for p in z.raw.exterior.coords[:-1]] for z in w.fence.zones],
         "target": {"lat": req["target"]["lat"], "lon": req["target"]["lon"]},
+        "area_m": [round(fr.width), round(fr.h)],
         "summary": _summary(w),
         "t_end": w.t,
     }

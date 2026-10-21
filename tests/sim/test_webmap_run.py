@@ -7,10 +7,11 @@ import urllib.request
 
 import pytest
 
+from src.webmap.geo import GeoFrame
 from src.webmap.runner import run
 from src.webmap.scenario_builder import RequestError
 from src.webmap.server import make_server
-from tests.unit.test_webmap import FR, ll, request
+from tests.unit.test_webmap import FR, bounds_request, ll, request
 
 
 @pytest.fixture(scope="module")
@@ -126,3 +127,37 @@ def test_server_run_and_errors(server):
     assert code == 400 and "mode" in data["error"]
     code, data = post(server, b"x" * 300_000, raw=True)
     assert code == 400 and "too large" in data["error"]
+
+
+# ------------------------------------------------------------------ larger, non-square area
+
+
+def test_rectangular_area_runs_and_stays_inside():
+    req, fr, at = bounds_request(zones=None)
+    req["zones"] = [{"corners": [at(0.4, 0.3), at(0.48, 0.7)]}]
+    r = run(req)
+    assert r["area_m"] == [round(fr.width), round(fr.h)]
+    row = r["summary"]["target_log"][0]
+    assert row["final_state"] == "COMPLETED" and r["summary"]["geofence_violations"] == 0
+    assert r["summary"]["baseline_match"] == [True]
+    for f in r["frames"][::8]:
+        for lat, lon, *_ in f["d"]:
+            x, y = fr.to_xy(lat, lon)
+            assert 0 <= x <= fr.width and 0 <= y <= fr.h
+    # the target is neutralized at the exact point that was asked for (to well under a metre of map precision)
+    tx, ty = fr.to_xy(r["target"]["lat"], r["target"]["lon"])
+    assert 0 < tx < fr.width and 0 < ty < fr.h
+
+
+def test_large_area_gets_a_long_enough_run():
+    fr = GeoFrame(28.565, 77.36, 12000.0)
+
+    def at(fx, fy):
+        la, lo = fr.to_latlon(fx * 12000, fy * 12000)
+        return {"lat": la, "lon": lo}
+
+    req = {"center": {"lat": 28.565, "lon": 77.36}, "size_m": 12000, "target": at(0.5, 0.5), "mode": "neutralize",
+           "drones": [dict(id=f"D{i + 1}", alt=60, battery_pct=0.9, sensor_radius=80, **at(fx, fy))
+                      for i, (fx, fy) in enumerate([(0.05, 0.05), (0.95, 0.05), (0.05, 0.95), (0.95, 0.95)])]}  # fmt: skip
+    r = run(req)
+    assert r["summary"]["target_log"][0]["final_state"] == "COMPLETED"
