@@ -127,6 +127,24 @@ class CoordinationMixin:
         for pid, t in p.get("seen", {}).items():
             if pid != self.id:
                 self.last_alive[pid] = max(self.last_alive.get(pid, t), t)
+        self._check_duplicate_owner(msg, now)
+
+    def _check_duplicate_owner(self: "Drone", msg: Message, now: float) -> None:
+        """Two owners for one task (the network was split while it was allocated): once a heartbeat shows the
+        other side's claim, repeat ours. The compare rule in the auction then makes the weaker claim release."""
+        p = msg.payload
+        mine, theirs = self.state.current_task, p.get("current_task")
+        if not mine or not theirs or p.get("epoch") != self.state.task_epoch:
+            return
+        tid = self.tracker.resolve(mine)
+        if tid != self.tracker.resolve(theirs):
+            return
+        e = self.auction.entry(tid)
+        if e is None or not e.committed or e.winner != self.id or now - e.last_resend < self.shared.heartbeat.period:
+            return
+        e.last_resend = now
+        self._emit(now, "DUPLICATE_OWNER_SEEN", {"other": msg.sender}, target_id=tid, epoch=e.epoch)
+        self._send_commit(now, tid)
 
     def _on_target_detected(self: "Drone", msg: Message, now: float) -> None:
         self._apply_summary(msg.payload["summary"], msg.sender, now)

@@ -588,3 +588,27 @@ python -m src.webmap
 ```
 
 `pytest tests/sim/test_crew_agents.py` drives the real agents with a scripted fake model (no key, no network).
+
+## Phase 5 report: failures, partitions, evaluation
+
+**Added**
+- `config/drone_failure.yaml`: the best bidder (D1) wins, then fails mid-flight. Its heartbeat stops, the owner timeout reopens the auction at epoch + 1, another drone completes and logs the target (reallocation about 8.6 s after the failure).
+- `config/partition.yaml`: the radio splits into {D1, D2} and {D3, D4} just before the target is reported, so each side elects its own owner (two drones head for one target). When the network heals the duplicate owner is detected and the weaker claim releases.
+- `src/evaluate.py`: runs every scenario over N seeds, checks each scenario's expectations, writes `output/eval/metrics.csv`, `summary.csv`, `summary.md` and four plots (`timeline`, `messages`, `agreement`, `robustness`).
+- `tests/sim/test_phase5_robustness.py`.
+
+**Two real bugs found by the evaluation and fixed**
+1. After a partition heals, two committed owners never noticed each other (nothing re-announced the claim). Heartbeats already carry the current task, so an owner that sees another owner of the same task and epoch now repeats its CLAIM (`DUPLICATE_OWNER_SEEN`); the existing compare rule then makes the weaker claim release.
+2. Under one seed of `false_observation` two drones merged the same two records in opposite directions (A to B and B to A), which made alias resolution loop forever. A peer summary that names a smaller ID now renames the local record, so the smallest ID always survives.
+
+**Run**
+```
+python -m src.evaluate                 # 10 seeds per scenario, about 1 min with --workers 4
+python -m src.evaluate --seeds 3 --scenarios partition drone_failure
+```
+Result with 10 seeds: 120 of 120 runs met their expectations. Geofence violations 0 and separation violations 0 in every run; baseline agreement 100% wherever the drones could talk to each other; false-confirmation rate 0%; track-loss reacquisition 100% (tracking_loss).
+
+**Honest notes**
+- `partition` shows 0% agreement with the centralized optimum on purpose: during the split each side only knew its own drones, so its winner differs from the all-knowing optimum. After the heal exactly one owner remains and the target is logged once.
+- If the network heals while both owners are already hovering over the target (heal at 40 s in the test) both briefly share the airspace and one separation violation is recorded; the target is still logged once. The shipped scenario heals earlier.
+- One of ten `limited_comms` seeds ends with a duplicate inspection; it is detected and marked in the target log (`duplicate_inspection = True`), as the acceptance rule requires.

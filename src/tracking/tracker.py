@@ -277,8 +277,21 @@ class Tracker:
             rec.relayed = True
             self.records[rec.id] = rec
             out.created, out.transition = rec.id, ev
+        names = summ.get("aliases", []) + [summ["target_id"]]
+        smaller = min((al for al in names if self.resolve(al) == al and al not in self.records and al < rec.id), default=None)
+        if smaller is not None:  # peers already merged under a smaller ID: the smallest ID survives everywhere
+            old = rec.id
+            self.records.pop(old)
+            rec.id = smaller
+            rec.aliases.add(old)
+            self.records[smaller] = rec
+            self.alias_of[old] = smaller
+            for al in rec.aliases:
+                if al != smaller:
+                    self.alias_of[al] = smaller
+            out.merges.append((smaller, old))
         out.target_id = rec.id
-        for al in summ.get("aliases", []) + [summ["target_id"]]:
+        for al in names:
             if al != rec.id and self.resolve(al) == al and al not in self.records:
                 self.alias_of[al] = rec.id
                 rec.aliases.add(al)
@@ -300,7 +313,7 @@ class Tracker:
         adopted = self._adopt_remote_state(rec, summ, sender, now)
         if adopted is not None:
             out.events.append(adopted)
-        out.merges = self._merge_duplicates(rec.id)
+        out.merges += self._merge_duplicates(rec.id)
         out.target_id = self.resolve(rec.id)
         return out
 

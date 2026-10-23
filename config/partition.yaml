@@ -1,0 +1,67 @@
+# Phase 5: the radio network splits in two ({D1, D2} and {D3, D4}) from t = 3 s to t = 20 s, just before a
+# target is reported to everyone at t = 5 s. Each side cannot hear the other, so each side runs its own
+# auction and elects its own owner: two drones are heading for the same target. When the network heals,
+# the drones see each other's claims, the duplicate owner is detected, one owner (the better claim)
+# keeps the task and the other releases it. If both had already inspected, the later log row is marked
+# duplicate_inspection.
+
+sim:
+  duration: 200
+  seed: 42
+
+mission:
+  neutralize_on_complete: true
+
+network:
+  comm_range: 2500
+  partitions:
+    - {start: 3, end: 20, groups: [[D1, D2], [D3, D4]]}
+  latency: [0.05, 0.2]
+  packet_loss: 0.05
+  max_message_age: 5.0
+
+drone_defaults:
+  comm_range: 2500
+
+geofence:
+  boundary: [[50, 50], [1950, 50], [1950, 1950], [50, 1950]]
+  margin: 15
+  altitude_limits: [15, 120]
+  restricted_zones:
+    - id: RZ-1
+      polygon: [[1000, 1500], [1250, 1500], [1250, 1800], [1000, 1800]]
+
+drones:
+  - id: D1
+    pos: [900, 800]
+    alt: 60
+    battery_pct: 0.90
+    home: [900, 650, 0]
+    patrol: [[900, 800, 60], [960, 800, 60], [960, 860, 60], [900, 860, 60]]
+  - id: D2
+    pos: [500, 1100]
+    alt: 70
+    battery_pct: 0.85
+    home: [500, 950, 0]
+    patrol: [[500, 1100, 70], [560, 1100, 70], [560, 1160, 70], [500, 1160, 70]]
+  - id: D3
+    pos: [1500, 1000]
+    alt: 80
+    battery_pct: 0.80
+    home: [1500, 850, 0]
+    patrol: [[1500, 900, 80], [1560, 900, 80], [1560, 960, 80], [1500, 960, 80]]
+  - id: D4
+    pos: [800, 1500]
+    alt: 50
+    battery_pct: 0.95
+    home: [800, 1350, 0]
+    patrol: [[800, 1500, 50], [860, 1500, 50], [860, 1560, 50], [800, 1560, 50]]
+
+targets:
+  - id: GT-1
+    pos: [1100, 1200]
+    alt: 0
+    appear_at: 0
+
+scenario_events:
+  - {t: 5, type: external_cue, pos: [1100, 1200]}
