@@ -1,0 +1,2 @@
+# AI crew (needs Python 3.10 - 3.13; CrewAI does not support 3.14)
+crewai==1.15.28

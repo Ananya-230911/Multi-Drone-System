@@ -558,3 +558,33 @@ now check the same properties together with the completed mission.
    inspection behaviour is unchanged unless a scenario turns it on, as `mission.yaml` does.
 6. After a reacquisition the owner flies back to an inspection point of the new estimate: the
    spiral can leave it up to 60 m away, where confidence is too low for the timer.
+
+## AI crew: one sentence instead of typing numbers
+
+Type e.g. **"Send drones to Sector 50 Noida"** in the box at the top of the map page and press *Ask the AI crew*.
+Four [CrewAI](https://www.crewai.com) agents (running on a Groq model) set the scene, so nothing has to be typed by hand
+and no two places get the same numbers:
+
+| Agent | Decides |
+|---|---|
+| Geo Scout | searches the map (tool `search_place`) and picks the place; it may only use coordinates the search returned |
+| Mission Planner | width and height of the area, where the target is, `neutralize` or `inspect`, whether to add a no-fly block |
+| Fleet Engineer | 4-5 drones: where each starts, altitude, battery, sensor radius |
+| Debrief Officer | after the run, explains in plain language why the drones chose the winner |
+
+The agents only **set up** the scenario and **explain** it. Which drone goes is still decided by the drones themselves
+through the decentralized auction (nothing in `src/crew` touches the allocation). Every answer from the model passes a
+validator (CrewAI guardrail) that sends it back for correction; if a part still fails, or there is no key / no CrewAI,
+the built-in offline rules supply that part and the page says so. The manual controls below the box still work as before.
+
+Setup (the crew needs Python 3.10-3.13; the plain simulation still runs on 3.14):
+
+```powershell
+py -3.13 -m venv .venv313
+.venv313\Scripts\Activate.ps1
+pip install -r requirements.txt -r requirements-crew.txt
+copy .env.example .env        # then open .env and paste your key after GROQ_API_KEY=
+python -m src.webmap
+```
+
+`pytest tests/sim/test_crew_agents.py` drives the real agents with a scripted fake model (no key, no network).

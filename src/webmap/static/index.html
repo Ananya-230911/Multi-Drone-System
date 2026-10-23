@@ -21,6 +21,14 @@
   .step h2 { font-size:13px; margin:0 0 8px; display:flex; align-items:center; gap:8px; }
   .n { background:var(--accent); color:#06121f; border-radius:50%; width:20px; height:20px; display:inline-flex;
        align-items:center; justify-content:center; font-weight:700; font-size:12px; }
+  textarea { width:100%; font:inherit; color:var(--text); background:#12161e; border:1px solid var(--line); border-radius:6px;
+             padding:6px 8px; resize:vertical; }
+  .ag { border-left:3px solid var(--accent); padding:2px 8px; margin:6px 0; font-size:12px; }
+  .ag.offline { border-left-color:var(--muted); }
+  .ag b { color:#fff; }
+  .tag { font-size:10px; padding:0 5px; border-radius:8px; background:#2a3140; color:var(--muted); margin-left:4px; }
+  .warn { color:#ffd27a; font-size:12px; margin:4px 0; }
+  #debrief { display:none; margin-top:10px; padding:8px; border-radius:6px; background:#1d2733; border:1px solid var(--accent); font-size:12.5px; }
   select { max-width:100%; }
   .row > select { flex:1; min-width:0; }
   input, select, button { font:inherit; color:var(--text); background:#12161e; border:1px solid var(--line);
@@ -120,6 +128,18 @@
     <h1>Drone coordination on a map</h1>
     <div class="sub">Simulation only. Pick a place, mark the target; the drones agree among themselves who goes.</div>
 
+    <div class="step" id="crewbox">
+      <h2><span class="n">AI</span> Describe the mission in one sentence</h2>
+      <textarea id="brief" rows="2" placeholder="e.g. Send drones to Sector 50 Noida"></textarea>
+      <div class="row">
+        <button id="askcrew" class="primary">Ask the AI crew</button>
+        <label class="hint"><input type="checkbox" id="autorun" checked> run it straight away</label>
+      </div>
+      <div id="crewstatus" class="hint"></div>
+      <div id="crewout"></div>
+      <div class="hint">The crew finds the place, sizes the area, puts the target and the drones in, and gives each drone its own altitude, battery and sensor. It only sets the scene: the drones still choose the winner themselves. Everything below stays editable by hand.</div>
+    </div>
+
     <div class="step">
       <h2><span class="n">1</span> Find a place</h2>
       <form id="searchform" class="row">
@@ -178,6 +198,8 @@
 
     <button id="run" class="primary" style="width:100%;padding:10px" disabled>Run simulation</button>
     <div id="status"></div>
+    <button id="explain" style="width:100%;margin-top:8px" disabled>Explain this run (AI debrief)</button>
+    <div id="debrief"></div>
     <div class="hint" style="margin-top:14px">Map &copy; OpenStreetMap contributors. Everything here is a simulation; nothing is connected to a real vehicle.</div>
   </div>
 
@@ -428,10 +450,70 @@ $("run").onclick = async () => {
     const r = await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(req)});
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || ("server answered " + r.status));
-    say("", ""); startPlayback(data);
+    say("", ""); S.last = data; $("explain").disabled = false; $("debrief").style.display = "none"; startPlayback(data);
+    if (S.crewRun) { S.crewRun = false; explain(); }
   } catch (e) { say("err", String(e.message || e)); }
   updateRun();
 };
+
+
+/* ------------------------------------------------------------------ AI crew */
+const esc = t => String(t).replace(/[&<>]/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;"}[c]));
+fetch("/api/status").then(r => r.json()).then(j => { $("crewstatus").textContent = j.message; }).catch(() => {});
+function applyRequest(req) {
+  const b = req.bounds;
+  if (!applyArea(L.latLngBounds([b.south, b.west], [b.north, b.east]))) return false;
+  $("aw").value = (S.w / 1000).toFixed(1); $("ah").value = (S.h / 1000).toFixed(1);
+  S.drones.forEach(d => d.marker.remove()); S.drones = [];
+  req.drones.forEach(x => {
+    const d = {id:x.id, lat:x.lat, lon:x.lon, alt:x.alt, battery:Math.round(x.battery_pct * 100), radius:x.sensor_radius, failAt:""};
+    d.marker = L.marker([d.lat, d.lon], {draggable:true, icon:mkIcon(d.id, MODE_COLOURS.PATROL, ""), zIndexOffset:500}).addTo(map);
+    d.marker.on("dragend", () => { const p = d.marker.getLatLng(); d.lat = p.lat; d.lon = p.lng; });
+    S.drones.push(d);
+  });
+  drawTable();
+  $("mode").value = req.mode;
+  setTarget(L.latLng(req.target.lat, req.target.lon), "typed");
+  $("tprec").textContent = "Placed by the AI crew.";
+  if (req.zones && req.zones.length) {
+    const c = req.zones[0].corners; S.zpoints = c.map(p => ({lat:p.lat, lon:p.lon}));
+    S.zrect = L.rectangle(c.map(p => [p.lat, p.lon]), {color:"#ff5a5a", weight:2, fillOpacity:.25, dashArray:"6 4", interactive:false}).addTo(map);
+    $("clearzone").disabled = false;
+  }
+  updateRun(); return true;
+}
+$("askcrew").onclick = async () => {
+  const text = $("brief").value.trim();
+  if (!text) { say("err", "Write a sentence first, for example: Send drones to Sector 50 Noida"); return; }
+  $("askcrew").disabled = true; $("crewout").textContent = ""; $("debrief").style.display = "none";
+  say("busy", "The AI crew is working (searching the map, sizing the area, setting up the drones)...");
+  try {
+    const r = await fetch("/api/crew", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text})});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ("server answered " + r.status));
+    if (!applyRequest(j.request)) return;
+    $("crewout").innerHTML = `<div class="hint">Planned for <b>${esc(j.place)}</b> (${(j.area_m[0] / 1000).toFixed(1)} x ${(j.area_m[1] / 1000).toFixed(1)} km)</div>` +
+      j.agents.map(a => `<div class="ag ${a.engine}"><b>${esc(a.name)}</b><span class="tag">${a.engine === "crew" ? "AI" : "rules"}</span> ${esc(a.says)}</div>`).join("") +
+      Object.entries(j.drone_notes).map(([k, v]) => `<div class="hint">${k}: ${esc(v)}</div>`).join("") +
+      j.warnings.map(w => `<div class="warn">${esc(w)}</div>`).join("");
+    say("ok", "Scenario ready. " + (j.engine === "offline" ? "(Built by the offline planner.)" : ""));
+    if ($("autorun").checked) { S.crewRun = true; $("run").click(); }
+  } catch (e) { say("err", String(e.message || e)); }
+  finally { $("askcrew").disabled = false; }
+};
+$("brief").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("askcrew").click(); } });
+async function explain() {
+  const res = S.last; if (!res) return;
+  $("explain").disabled = true; const box = $("debrief"); box.style.display = "block"; box.textContent = "Debrief officer is writing...";
+  try {
+    const r = await fetch("/api/debrief", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({allocations:res.allocations, summary:res.summary})});
+    const j = await r.json(); if (!r.ok) throw new Error(j.error || "server answered " + r.status);
+    box.innerHTML = `<b>Debrief</b><span class="tag">${j.engine === "crew" ? "AI" : "rules"}</span><br>` + esc(j.text);
+  } catch (e) { box.textContent = "Could not write the debrief: " + (e.message || e); }
+  $("explain").disabled = false;
+}
+$("explain").onclick = explain;
 
 /* ------------------------------------------------------------------ playback */
 const P = {frames:[], t:0, playing:false, idx:0, layers:null, last:0, lastIdx:-1, tN:null, prevT:0};

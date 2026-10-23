@@ -3,7 +3,9 @@
     python -m src.webmap            # serves http://127.0.0.1:8000 and opens the browser
 
 Endpoints: GET /  and /static/...  (the page, Leaflet bundled), POST /api/run (a scenario
-request in, the recorded flight out). It binds to 127.0.0.1 only: nothing on the network can
+request in, the recorded flight out), POST /api/crew (one sentence in, a scenario request and
+the AI agents' reasoning out), POST /api/debrief (a finished run in, a plain-language
+explanation out), GET /api/status (is the AI crew available). It binds to 127.0.0.1 only: nothing on the network can
 reach it, and it never talks to anything except the browser that opened it.
 """
 
@@ -15,6 +17,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from src.crew import env as crew_env
+from src.crew import service as crew
 from src.webmap.runner import run
 from src.webmap.scenario_builder import RequestError
 
@@ -35,6 +39,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             path = "/static/index.html"
+        if path == "/api/status":
+            return self._json(200, crew_env.status(crew_env.load()))
         if not path.startswith("/static/"):
             return self._send(404, b"not found", "text/plain")
         target = (STATIC / path[len("/static/"):]).resolve()
@@ -46,21 +52,35 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ POST
 
     def do_POST(self) -> None:
-        if self.path != "/api/run":
+        handlers = {"/api/run": run, "/api/crew": self._crew, "/api/debrief": self._debrief}
+        fn = handlers.get(self.path)
+        if fn is None:
             return self._send(404, b"not found", "text/plain")
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if not 0 < n <= MAX_BODY:
                 raise RequestError("request body is empty or too large")
             req = json.loads(self.rfile.read(n))
-            result = run(req)
-        except RequestError as exc:
+            result = fn(req)
+        except (RequestError, crew.CrewError) as exc:
             return self._json(400, {"error": str(exc)})
         except (json.JSONDecodeError, UnicodeDecodeError):
             return self._json(400, {"error": "the request is not valid JSON"})
         except Exception as exc:  # a bug must reach the user as a message, not a hung page
             return self._json(500, {"error": f"internal error: {type(exc).__name__}: {exc}"})
         self._json(200, result)
+
+    @staticmethod
+    def _crew(req: dict) -> dict:
+        if not isinstance(req, dict):
+            raise RequestError("request must be a JSON object")
+        return crew.plan_from_text(req.get("text", ""))
+
+    @staticmethod
+    def _debrief(req: dict) -> dict:
+        if not isinstance(req, dict):
+            raise RequestError("request must be a JSON object")
+        return crew.debrief(req)
 
     # ------------------------------------------------------------------ helpers
 
