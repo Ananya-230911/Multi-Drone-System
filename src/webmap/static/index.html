@@ -101,6 +101,10 @@
     background:radial-gradient(circle, rgba(90,90,90,.7), rgba(90,90,90,0) 70%); transform:translate(-50%,-50%); animation:wisp 3.2s ease-out infinite; }
   .crater .w2 { animation-delay:1.6s; }
   @keyframes wisp { 0%{transform:translate(-50%,-50%) scale(.5);opacity:.8} 100%{transform:translate(-30%,-300%) scale(2);opacity:0} }
+  #toast { position:absolute; left:50%; top:14px; transform:translateX(-50%); z-index:1200; display:none; max-width:70%;
+           padding:9px 16px; border-radius:8px; font-size:14px; font-weight:600; box-shadow:0 4px 14px rgba(0,0,0,.35); }
+  #toast.err { background:#ffdede; color:#6a0d0d; border:2px solid var(--warn); }
+  #toast.info { background:#dff0ff; color:#0b2e55; border:2px solid var(--accent); }
   #centre { position:absolute; left:50%; top:50%; width:26px; height:26px; margin:-13px 0 0 -13px; z-index:900; pointer-events:none; display:none; }
   #centre:before, #centre:after { content:""; position:absolute; background:#12141a; box-shadow:0 0 0 1px #fff; }
   #centre:before { left:12px; top:0; width:2px; height:26px; } #centre:after { top:12px; left:0; height:2px; width:26px; }
@@ -149,7 +153,7 @@
         <input id="tcoord" type="text" placeholder="or type  lat, lon" style="flex:1;min-width:0">
         <button id="settcoord" disabled>Set</button>
       </div>
-      <div id="tprec" class="hint"></div>
+      <div id="tprec" class="hint">Tip: once the area is set, just click anywhere inside the blue rectangle to place or move the target.</div>
       <div class="row">
         <select id="mode">
           <option value="neutralize" selected>Locate, lock, log and neutralize (simulated)</option>
@@ -180,6 +184,7 @@
   <div id="mapwrap">
     <div id="map"></div>
     <div id="centre" title="The operating area will be centred here"></div>
+    <div id="toast"></div>
     <div id="banner"></div>
     <div id="panel"></div>
     <div id="bar">
@@ -225,7 +230,15 @@ function mPerPx() { return 156543.03 * Math.cos(map.getCenter().lat * Math.PI / 
 function offset(lat0, lon0, dx, dy) {
   return [lat0 + dy / M_PER_DEG, lon0 + dx / (M_PER_DEG * Math.cos(lat0 * Math.PI / 180))];
 }
-function say(kind, msg) { const s = $("status"); s.className = kind; s.textContent = msg; s.style.display = kind ? "block" : "none"; }
+function say(kind, msg) {
+  const s = $("status"); s.className = kind; s.textContent = msg; s.style.display = kind ? "block" : "none";
+  if (kind === "err") toast("err", msg);  // the left panel may be scrolled away from the status box
+}
+let toastTimer = null;
+function toast(kind, msg, ms = 5000) {
+  const t = $("toast"); t.className = kind; t.textContent = msg; t.style.display = "block";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = "none"; }, ms);
+}
 function mkIcon(label, colour, mode) {
   return L.divIcon({className:"", iconSize:[0,0], html:`<div class="dm" style="--c:${colour}"><div class="dot">${label.slice(1)}</div>` +
     `<span class="md">${label}${mode ? " · " + mode : ""}</span></div>`});
@@ -357,11 +370,12 @@ $("placezone").onclick = () => pick("zone");
 function clearZone() { if (S.zrect) S.zrect.remove(); S.zrect = null; S.zpoints = null; $("clearzone").disabled = true; }
 $("clearzone").onclick = clearZone;
 function setTarget(latlng, how) {
-  if (!S.rect.getBounds().contains(latlng)) { say("err", "That point is outside the blue rectangle (the operating area)."); return false; }
+  if (!S.rect.getBounds().contains(latlng)) { say("err", "That point is outside the blue rectangle (the operating area), so the target did not move."); return false; }
   S.target = {lat:latlng.lat, lon:latlng.lng};
   if (S.tmarker) S.tmarker.remove();
   S.tkind = null; S.tmarker = L.marker(latlng, {icon:targetIcon, interactive:false}).addTo(map); S.tkind = "idle";
   $("tinfo").textContent = latlng.lat.toFixed(6) + ", " + latlng.lng.toFixed(6);
+  toast("info", "Target placed at " + latlng.lat.toFixed(5) + ", " + latlng.lng.toFixed(5), 2500);
   $("tprec").textContent = how === "click" ? `Placed by click. Precision at this zoom: about ${Math.max(1, Math.round(mPerPx()))} m per pixel; zoom in and click again for a more exact spot, or type exact coordinates above.` : "Placed from typed coordinates.";
   pick(null); updateRun(); return true;
 }
@@ -371,7 +385,16 @@ $("settcoord").onclick = () => {
   if (setTarget(L.latLng(+m[1], +m[2]), "typed")) { say("", ""); map.panTo([+m[1], +m[2]]); }
 };
 map.on("click", ev => {
-  if (!S.picking) return;
+  if (!S.picking) {
+    if (!S.rect) return;  // nothing to place yet
+    if (P.layers) { toast("info", "A run is on screen. Press 'Edit setup' to change the target."); return; }
+    if (!S.rect.getBounds().contains(ev.latlng)) {
+      toast("err", "That click is outside the blue rectangle, so the target did not move. Click inside it (or make the area bigger).");
+      return;
+    }
+    setTarget(ev.latlng, "click");  // a click inside the area always places or moves the target
+    return;
+  }
   if (S.picking === "area") {
     S.acorners.push(ev.latlng);
     if (S.acorners.length === 1) { S.atmp = L.circleMarker(ev.latlng, {radius:5, color:"#46a0ff"}).addTo(map); say("busy", "Now click the opposite corner."); return; }
