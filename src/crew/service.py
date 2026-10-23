@@ -78,6 +78,8 @@ def plan_from_text(text: str, settings: env.Settings | None = None, geocoder: Ca
     area = step("Mission Planner", "Sizes the area, places the target",
                 (lambda: ag.run_planner(llm, text, place)) if use_crew else None,
                 lambda: plan.check_area(offline.plan_area(text, place, rng)))  # fmt: skip
+    # the operator marks the real target on the map; the drones are laid out around the area centre
+    area = {**area, "target_dx_m": 0, "target_dy_m": 0}
     # 3. Fleet Engineer ---------------------------------------------------------------------------
     count = offline.wanted_count(text)
     fleet = step("Fleet Engineer", "Chooses drone positions and specs",

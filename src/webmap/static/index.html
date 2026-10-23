@@ -133,7 +133,7 @@
       <textarea id="brief" rows="2" placeholder="e.g. Send drones to Sector 50 Noida"></textarea>
       <div class="row">
         <button id="askcrew" class="primary">Ask the AI crew</button>
-        <label class="hint"><input type="checkbox" id="autorun" checked> run it straight away</label>
+        <label class="hint"><input type="checkbox" id="autorun" checked> run as soon as I click the target</label>
       </div>
       <div id="crewstatus" class="hint"></div>
       <div id="crewout"></div>
@@ -393,13 +393,16 @@ function clearZone() { if (S.zrect) S.zrect.remove(); S.zrect = null; S.zpoints 
 $("clearzone").onclick = clearZone;
 function setTarget(latlng, how) {
   if (!S.rect.getBounds().contains(latlng)) { say("err", "That point is outside the blue rectangle (the operating area), so the target did not move."); return false; }
+  if (S.zrect && S.crewZone && S.zrect.getBounds().contains(latlng)) { clearZone(); S.crewZone = false; toast("info", "That spot was inside the crew's no-fly block, so the block was removed."); }
   S.target = {lat:latlng.lat, lon:latlng.lng};
   if (S.tmarker) S.tmarker.remove();
   S.tkind = null; S.tmarker = L.marker(latlng, {icon:targetIcon, interactive:false}).addTo(map); S.tkind = "idle";
   $("tinfo").textContent = latlng.lat.toFixed(6) + ", " + latlng.lng.toFixed(6);
   toast("info", "Target placed at " + latlng.lat.toFixed(5) + ", " + latlng.lng.toFixed(5), 2500);
   $("tprec").textContent = how === "click" ? `Placed by click. Precision at this zoom: about ${Math.max(1, Math.round(mPerPx()))} m per pixel; zoom in and click again for a more exact spot, or type exact coordinates above.` : "Placed from typed coordinates.";
-  pick(null); updateRun(); return true;
+  pick(null); updateRun();
+  if (S.crewRun && how !== "auto") { S.crewRun = true; $("run").click(); }
+  return true;
 }
 $("settcoord").onclick = () => {
   const m = $("tcoord").value.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
@@ -473,14 +476,13 @@ function applyRequest(req) {
   });
   drawTable();
   $("mode").value = req.mode;
-  setTarget(L.latLng(req.target.lat, req.target.lon), "typed");
-  $("tprec").textContent = "Placed by the AI crew.";
+  S.crewZone = !!(req.zones && req.zones.length);
   if (req.zones && req.zones.length) {
     const c = req.zones[0].corners; S.zpoints = c.map(p => ({lat:p.lat, lon:p.lon}));
     S.zrect = L.rectangle(c.map(p => [p.lat, p.lon]), {color:"#ff5a5a", weight:2, fillOpacity:.25, dashArray:"6 4", interactive:false}).addTo(map);
     $("clearzone").disabled = false;
   }
-  updateRun(); return true;
+  updateRun(); return true;  // the target is left for the operator to click
 }
 $("askcrew").onclick = async () => {
   const text = $("brief").value.trim();
@@ -496,8 +498,9 @@ $("askcrew").onclick = async () => {
       j.agents.map(a => `<div class="ag ${a.engine}"><b>${esc(a.name)}</b><span class="tag">${a.engine === "crew" ? "AI" : "rules"}</span> ${esc(a.says)}</div>`).join("") +
       Object.entries(j.drone_notes).map(([k, v]) => `<div class="hint">${k}: ${esc(v)}</div>`).join("") +
       j.warnings.map(w => `<div class="warn">${esc(w)}</div>`).join("");
-    say("ok", "Scenario ready. " + (j.engine === "offline" ? "(Built by the offline planner.)" : ""));
-    if ($("autorun").checked) { S.crewRun = true; $("run").click(); }
+    S.crewRun = $("autorun").checked;
+    say("ok", "Area and drones are ready. NOW CLICK THE TARGET on the map (anywhere inside the blue rectangle)" + (S.crewRun ? " and the run starts." : ", then press Run."));
+    toast("info", "Click where the target is, inside the blue rectangle.", 8000);
   } catch (e) { say("err", String(e.message || e)); }
   finally { $("askcrew").disabled = false; }
 };

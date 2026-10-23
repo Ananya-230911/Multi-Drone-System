@@ -54,9 +54,9 @@ def plan_area(text: str, place: dict, rng: random.Random) -> dict:
     no_fly = bool(AVOID_WORDS.search(text)) or rng.random() < 0.4
     return {"width_m": round(w), "height_m": round(h), "target_dx_m": round(dx), "target_dy_m": round(dy), "mode": mode,
             "no_fly": no_fly,
-            "reason": f"Area sized from the {max(bw, bh) / 1000:.1f} km outline of the place on the map, target placed "
-                      f"{abs(dx):.0f} m E/W and {abs(dy):.0f} m N/S of the centre."
-                      + (" A small no-fly block is added next to the target." if no_fly else "")}  # fmt: skip
+            "reason": f"Area sized from the {max(bw, bh) / 1000:.1f} km outline of the place on the map. "
+                      "The target is left for the operator to click."
+                      + (" A small no-fly block is added near the centre." if no_fly else "")}  # fmt: skip
 
 
 def plan_fleet(text: str, area: dict, rng: random.Random) -> dict:
@@ -85,6 +85,6 @@ def plan_fleet(text: str, area: dict, rng: random.Random) -> dict:
         drones[0]["alt"] = 45.0
         drones[1]["alt"] = 90.0
     for d in drones:
-        d["note"] = (f"{d['distance_m']:.0f} m from the target, flies at {d['alt']:.0f} m, "
+        d["note"] = (f"{d['distance_m']:.0f} m from the area centre, flies at {d['alt']:.0f} m, "
                      f"{d['battery_pct'] * 100:.0f}% battery, sees {d['sensor_radius']:.0f} m")  # fmt: skip
     return {"drones": drones}

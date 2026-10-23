@@ -98,12 +98,12 @@ def run_scout(llm, query: str, geocoder, seen: list[dict]) -> dict:
 def run_planner(llm, text: str, place: dict) -> dict:
     return _run(
         llm, role="Mission Planner",
-        goal="Size the operating area and place the target sensibly for this location.",
+        goal="Size the operating area for this location.",
         backstory="You plan small-area drone inspection simulations. Areas are rectangles between 800 m and 12000 m per side.",
         description=(f"Operator request: \"{text}\".\nPlace: {place['name']} (lat {place['lat']}, lon {place['lon']}); its map "
                      f"outline is about {place['width_m']} m wide and {place['height_m']} m tall.\nChoose: width_m and height_m "
-                     "of the operating area (cover the place with some room, typically 1500 to 4000), the target's offset from the "
-                     "area centre target_dx_m (east+) and target_dy_m (north+) (keep at least 300 m from every edge), mode "
+                     "of the operating area (cover the place with some room, typically 1500 to 4000), target_dx_m and target_dy_m "
+                     "(always 0: the operator marks the real target on the map themselves), mode "
                      "('neutralize' unless the operator only wants to inspect/observe), and no_fly (true to add a small "
                      "restricted block beside the target to force a detour).\nAnswer with ONLY a JSON object: "
                      '{"width_m": n, "height_m": n, "target_dx_m": n, "target_dy_m": n, "mode": str, "no_fly": bool, '
