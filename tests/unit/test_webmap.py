@@ -160,3 +160,47 @@ def test_target_and_drones_must_be_inside_the_rectangle():
     req["drones"][0].update(at(0.001, 0.5))
     with pytest.raises(RequestError, match="too close to the edge"):
         build_config(req)
+
+
+# ---------------------------------------------------------------- several targets at once
+
+
+def two_targets(**kw):
+    r = request(**kw)
+    t = r.pop("target")
+    r["targets"] = [t, {"lat": t["lat"] + 0.004, "lon": t["lon"] - 0.003}]
+    return r
+
+
+def test_several_targets_become_ground_truth_and_cues_at_the_same_time():
+    from src.webmap.scenario_builder import build_dict
+
+    cfg, _ = build_dict(two_targets())
+    assert [t["id"] for t in cfg["targets"]] == ["GT-1", "GT-2"]
+    cues = [e for e in cfg["scenario_events"] if e["type"] == "external_cue"]
+    assert len(cues) == 2 and {e["t"] for e in cues} == {5.0}
+
+
+def test_target_delay_and_single_target_request_still_work():
+    from src.webmap.scenario_builder import build_dict
+
+    r = two_targets()
+    r["targets"][1]["at"] = 30
+    cfg, _ = build_dict(r)
+    assert sorted(e["t"] for e in cfg["scenario_events"] if e["type"] == "external_cue") == [5.0, 35.0]
+    one, _ = build_dict(request())
+    assert [t["id"] for t in one["targets"]] == ["TARGET"] and one["sim"]["duration"] < cfg["sim"]["duration"]
+
+
+@pytest.mark.parametrize("mutate,text", [
+    (lambda r: r["targets"].append(dict(r["targets"][0])), "closer than 60 m"),
+    (lambda r: r.update(targets=[]), "between 1 and 8"),
+    (lambda r: r.update(targets=[r["targets"][0]] * 9), "between 1 and 8"),
+    (lambda r: r["targets"][1].update(lat=80.0), "outside the operating area"),
+    (lambda r: r["targets"][1].update(at=-1), "at"),
+])
+def test_bad_target_lists_get_clear_messages(mutate, text):
+    r = two_targets()
+    mutate(r)
+    with pytest.raises(RequestError, match=text):
+        build_config(r)

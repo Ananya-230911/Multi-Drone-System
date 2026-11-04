@@ -60,6 +60,8 @@
              display:flex; align-items:center; justify-content:center; box-shadow:0 0 6px rgba(0,0,0,.6); }
   .dm .md { display:block; margin-top:1px; font-size:10px; white-space:nowrap; }
   .tg { transform:translate(-50%,-50%); }
+  .tnum { position:absolute; left:12px; top:-24px; background:#ff4d4d; color:#fff; font-weight:700; font-size:11px; border-radius:9px;
+          padding:0 5px; text-shadow:none; box-shadow:0 0 3px #000; }
   #panel { position:absolute; top:10px; right:10px; width:400px; max-height:calc(100% - 100px); overflow-y:auto; z-index:1000;
            background:rgba(20,23,31,.94); border:1px solid var(--line); border-radius:10px; padding:10px 12px;
            display:none; font-size:12.5px; }
@@ -170,6 +172,12 @@
         <span id="tinfo" class="hint mono"></span>
       </div>
       <div class="row">
+        <button id="addtarget" disabled>+ Add another target</button>
+        <button id="cleartargets" disabled>Remove extra targets</button>
+        <span id="extrainfo" class="hint"></span>
+      </div>
+      <div class="hint">Several targets at once: place the first, press <b>+ Add another target</b>, then click each further spot (up to 8 in all, at least 60 m apart). The drones bid for all of them together; a drone that is already busy keeps the next target in its queue and flies straight on to it. If you use the AI box, untick "run as soon as I click the target" first.</div>
+      <div class="row">
         <input id="tcoord" type="text" placeholder="or type  lat, lon" style="flex:1;min-width:0">
         <button id="settcoord" disabled>Set</button>
       </div>
@@ -245,7 +253,7 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:19,
 L.control.scale({metric:true, imperial:false}).addTo(map);
 
 const S = {w:2000, h:2000, bounds:null, rect:null, drones:[], target:null, tmarker:null, picking:null, zcorners:[], zrect:null,
-           result:null, view:null, pin:null, tkind:null, acorners:[], atmp:null};
+           result:null, view:null, pin:null, tkind:null, acorners:[], atmp:null, extra:[]};
 const MIN_KM = 0.8, MAX_KM = 12;
 function mPerPx() { return 156543.03 * Math.cos(map.getCenter().lat * Math.PI / 180) / Math.pow(2, map.getZoom()); }
 
@@ -281,9 +289,29 @@ function boom(latlng) {
   const mp = $("map"); mp.classList.remove("shake"); void mp.offsetWidth; mp.classList.add("shake");
   setTimeout(() => { m.remove(); mp.classList.remove("shake"); }, 3300);
 }
+const T_HTML = {idle:`<div class="tg" style="position:relative">${CROSS}</div>`, lock:`<div class="tg" style="position:relative">${CROSS}<i class="pulse"></i></div>`,
+  dead:deadIcon.options.html};
+function tIcon(kind, n) { return L.divIcon({className:"", iconSize:[0,0], html:T_HTML[kind] + (n ? `<span class="tnum">${n}</span>` : "")}); }
 function setTargetIcon(kind) {  // only touch the DOM when it changes, so CSS animations keep running
-  if (!S.tmarker || S.tkind === kind) return;
-  S.tkind = kind; S.tmarker.setIcon(kind === "dead" ? deadIcon : kind === "lock" ? lockIcon : targetIcon);
+  const key = kind + (S.extra.length ? "1" : "");
+  if (!S.tmarker || S.tkind === key) return;
+  S.tkind = key; S.tmarker.setIcon(tIcon(kind, S.extra.length ? 1 : 0));
+}
+function setExtraIcon(e, n, kind) { if (e.kind === kind) return; e.kind = kind; e.marker.setIcon(tIcon(kind, n)); }
+function addExtra(latlng) {
+  if (!S.rect.getBounds().contains(latlng)) { toast("err", "That click is outside the blue rectangle, so no target was added."); return; }
+  if (S.extra.length >= 7) { toast("err", "At most 8 targets (the first plus 7 more)."); return; }
+  const all = [S.target, ...S.extra].map(t => L.latLng(t.lat, t.lon));
+  if (all.some(p => p.distanceTo(latlng) < 60)) { toast("err", "Too close to another target (keep at least 60 m apart)."); return; }
+  const e = {lat:latlng.lat, lon:latlng.lng, kind:"idle"};
+  e.marker = L.marker(latlng, {icon:tIcon("idle", S.extra.length + 2), interactive:false}).addTo(map);
+  S.extra.push(e); S.tkind = null; setTargetIcon("idle"); extraChanged();
+  toast("info", `Target ${S.extra.length + 1} added. Click more spots, or press Run.`, 2500);
+}
+function clearExtras() { S.extra.forEach(e => e.marker.remove()); S.extra = []; S.tkind = null; setTargetIcon("idle"); extraChanged(); }
+function extraChanged() {
+  $("extrainfo").textContent = S.extra.length ? `${S.extra.length + 1} targets` : "";
+  $("cleartargets").disabled = !S.extra.length; updateRun();
 }
 
 /* ------------------------------------------------------------------ 1. search */
@@ -347,6 +375,7 @@ function applyArea(bounds) {
     S.drones.push(d);
   });
   S.target = null; if (S.tmarker) { S.tmarker.remove(); S.tmarker = null; } S.tkind = null;
+  S.extra.forEach(e => e.marker.remove()); S.extra = []; extraChanged();
   $("tinfo").textContent = ""; $("tprec").textContent = "";
   clearZone(); drawTable();
   ["placetarget", "placezone", "settcoord"].forEach(i => $(i).disabled = false); updateRun();
@@ -381,13 +410,17 @@ function drawTable() {
 function pick(kind) {
   S.picking = S.picking === kind ? null : kind; S.zcorners = []; S.acorners = [];
   if (S.atmp) { S.atmp.remove(); S.atmp = null; }
+  $("addtarget").classList.toggle("on", S.picking === "extra");
   $("placetarget").classList.toggle("on", S.picking === "target"); $("placezone").classList.toggle("on", S.picking === "zone");
   $("drawarea").classList.toggle("on", S.picking === "area");
   map.getContainer().style.cursor = S.picking ? "crosshair" : "";
   if (S.picking === "area") say("busy", "Click one corner of the operating area, then the opposite corner.");
+  else if (S.picking === "extra") say("busy", "Click each further target inside the blue rectangle (at least 60 m apart). Press the button again when you are done.");
   else if (S.picking === "target") { const m = mPerPx(); say("busy", "Click the target location. " + (m > 4 ? "Zoom in first for a more exact spot (now about " + Math.round(m) + " m per pixel)." : "")); }
 }
 $("placetarget").onclick = () => pick("target");
+$("addtarget").onclick = () => pick("extra");
+$("cleartargets").onclick = clearExtras;
 $("placezone").onclick = () => pick("zone");
 function clearZone() { if (S.zrect) S.zrect.remove(); S.zrect = null; S.zpoints = null; $("clearzone").disabled = true; }
 $("clearzone").onclick = clearZone;
@@ -396,7 +429,8 @@ function setTarget(latlng, how) {
   if (S.zrect && S.crewZone && S.zrect.getBounds().contains(latlng)) { clearZone(); S.crewZone = false; toast("info", "That spot was inside the crew's no-fly block, so the block was removed."); }
   S.target = {lat:latlng.lat, lon:latlng.lng};
   if (S.tmarker) S.tmarker.remove();
-  S.tkind = null; S.tmarker = L.marker(latlng, {icon:targetIcon, interactive:false}).addTo(map); S.tkind = "idle";
+  const badge = S.extra.length ? 1 : 0;
+  S.tkind = null; S.tmarker = L.marker(latlng, {icon:tIcon("idle", badge), interactive:false}).addTo(map); S.tkind = "idle" + (badge ? "1" : "");
   $("tinfo").textContent = latlng.lat.toFixed(6) + ", " + latlng.lng.toFixed(6);
   toast("info", "Target placed at " + latlng.lat.toFixed(5) + ", " + latlng.lng.toFixed(5), 2500);
   $("tprec").textContent = how === "click" ? `Placed by click. Precision at this zoom: about ${Math.max(1, Math.round(mPerPx()))} m per pixel; zoom in and click again for a more exact spot, or type exact coordinates above.` : "Placed from typed coordinates.";
@@ -428,6 +462,7 @@ map.on("click", ev => {
     return;
   }
   if (!S.rect) return;
+  if (S.picking === "extra") { addExtra(ev.latlng); return; }
   if (!S.rect.getBounds().contains(ev.latlng)) { say("err", "Click inside the blue rectangle (the operating area)."); return; }
   say("", "");
   if (S.picking === "target") setTarget(ev.latlng, "click");
@@ -440,11 +475,11 @@ map.on("click", ev => {
     }
   }
 });
-function updateRun() { $("run").disabled = !(S.rect && S.target); }
+function updateRun() { $("run").disabled = !(S.rect && S.target); $("addtarget").disabled = !(S.rect && S.target); }
 
 /* ------------------------------------------------------------------ run */
 $("run").onclick = async () => {
-  const b = S.bounds, req = {bounds:{south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast()}, target:S.target, mode:$("mode").value,
+  const b = S.bounds, req = {bounds:{south:b.getSouth(), west:b.getWest(), north:b.getNorth(), east:b.getEast()}, ...(S.extra.length ? {targets:[S.target, ...S.extra.map(e => ({lat:e.lat, lon:e.lon}))]} : {target:S.target}), mode:$("mode").value,
     zones:S.zpoints ? [{corners:S.zpoints}] : [],
     drones:S.drones.map(d => ({id:d.id, lat:d.lat, lon:d.lon, alt:d.alt, battery_pct:d.battery / 100, sensor_radius:d.radius,
                                ...(d.failAt !== "" ? {fail_at:d.failAt} : {})}))};
@@ -526,11 +561,16 @@ function clearPlayback() {
   if (P.layers) { P.layers.all.forEach(l => l.remove()); P.layers = null; }
   S.result = null; $("panel").style.display = "none"; $("bar").style.display = "none"; $("banner").style.display = "none";
   S.drones.forEach(d => { d.marker.setLatLng([d.lat, d.lon]); d.marker.setIcon(mkIcon(d.id, MODE_COLOURS.PATROL, "")); d.marker.dragging && d.marker.dragging.enable(); });
-  setTargetIcon("idle"); syncCentre();
+  setTargetIcon("idle"); S.extra.forEach((e, k) => setExtraIcon(e, k + 2, "idle")); syncCentre();
 }
 function startPlayback(res) {
   clearPlayback(); S.result = res; P.frames = res.frames; P.t = 0; P.lastIdx = -1; P.idx = 0; P.prevT = 0;
   const nev = res.events.find(e => e.type === "TARGET_NEUTRALIZED"); P.tN = nev ? nev.t : null;
+  P.multi = !!(res.targets && res.targets.length > 1 && res.frames[0].tv);
+  if (P.multi) {  // several targets: each one's own neutralization time, from the recorded frames
+    P.tNs = res.targets.map((_, k) => { const fr_ = res.frames.find(f => f.nz && f.nz[k]); return fr_ ? fr_.t : null; });
+    P.tN = P.tNs[0];
+  }
   const all = [];
   const L_ = {foot:[], trail:[], all};
   S.drones.forEach((d, i) => {
@@ -541,6 +581,7 @@ function startPlayback(res) {
   });
   L_.lock = L.polyline([], {color:"#ff4d4d", weight:3, dashArray:"8 6", interactive:false}).addTo(map); all.push(L_.lock);
   L_.route = L.polyline([], {color:"#ffe066", weight:3, opacity:.9, interactive:false}).addTo(map); all.push(L_.route);
+  L_.xlock = S.extra.map(() => { const l = L.polyline([], {color:"#ff4d4d", weight:3, dashArray:"8 6", interactive:false}).addTo(map); all.push(l); return l; });
   P.layers = L_; syncCentre(); if (S.pin) { S.pin.remove(); S.pin = null; }
   map.fitBounds(S.rect.getBounds(), {paddingTopLeft:[30, 60], paddingBottomRight:[440, 80]});  // leave room for the panel
   $("bar").style.display = "flex"; $("panel").style.display = "block"; $("scrub").max = Math.round(res.t_end * 10);
@@ -582,16 +623,35 @@ function render(force) {
     P.layers.lock.setStyle({dashArray: tstate === "TRACKING" ? null : "8 6", weight: tstate === "TRACKING" ? 4 : 2});
   } else P.layers.lock.setLatLngs([]);
   const route = [...R.routes].reverse().find(r => r.t <= P.t && r.kind === "mission" && r.actor === f0.owner);
-  P.layers.route.setLatLngs(route && tstate !== "COMPLETED" && tstate !== "CANCELLED" ? route.points : []);
+  if (P.multi) {  // one route line per drone that still has a target to reach
+    const live = f0.tv.filter(v => v[1] && !["COMPLETED", "CANCELLED"].includes(R.target_states[v[0]])).map(v => v[1]);
+    P.layers.route.setLatLngs([...new Set(live)].map(o => {
+      const r = [...R.routes].reverse().find(r => r.t <= P.t && r.kind === "mission" && r.actor === o); return r ? r.points : null; }).filter(Boolean));
+  } else P.layers.route.setLatLngs(route && tstate !== "COMPLETED" && tstate !== "CANCELLED" ? route.points : []);
   const dead = P.tN !== null && P.t >= P.tN;
   if (dead && P.prevT < P.tN && P.playing && P.t - P.tN < 4) boom(S.tmarker.getLatLng());  // the burst, once, as it happens
+  if (P.multi) S.extra.forEach((e, k) => {
+    const tv = f0.tv[k + 1], st = R.target_states[tv[0]], oi = tv[1] ? S.drones.findIndex(d => d.id === tv[1]) : -1, tNk = P.tNs[k + 1];
+    if (oi >= 0 && ["ENROUTE", "TRACKING", "TRACKING_LOST", "REACQUIRING", "ALLOCATED"].includes(st)) {
+      P.layers.xlock[k].setLatLngs([S.drones[oi].marker.getLatLng(), [e.lat, e.lon]]);
+      P.layers.xlock[k].setStyle({dashArray: st === "TRACKING" ? null : "8 6", weight: st === "TRACKING" ? 4 : 2});
+    } else P.layers.xlock[k].setLatLngs([]);
+    const deadk = tNk !== null && P.t >= tNk;
+    if (deadk && P.prevT < tNk && P.playing && P.t - tNk < 4) boom(e.marker.getLatLng());
+    setExtraIcon(e, k + 2, deadk ? "dead" : (st === "TRACKING" && tv[1] ? "lock" : "idle"));
+  });
   P.prevT = P.t;
   setTargetIcon(dead ? "dead" : (tstate === "TRACKING" && mode0Owner(f0) ? "lock" : "idle"));
   $("scrub").value = Math.round(P.t * 10); $("clock").textContent = P.t.toFixed(1) + " / " + R.t_end.toFixed(0) + " s";
   const bn = $("banner"), done = R.events.find(e => e.type === "TARGET_NEUTRALIZED" && e.t <= P.t);
+  const nDone = R.events.filter(e => e.type === "TARGET_NEUTRALIZED" && e.t <= P.t).length;
   const logged = R.events.find(e => e.type === "TARGET_LOGGED" && e.t <= P.t);
   const cancelled = R.events.find(e => (e.type === "TASK_CANCELLED" || e.type === "ALLOCATION_FAILED") && e.t <= P.t);
-  if (done) { bn.className = ""; bn.textContent = "MISSION COMPLETE: target neutralized by " + done.text.match(/by (\w+)/)[1]; bn.style.display = "block"; }
+  if (P.multi && nDone) {
+    bn.className = ""; bn.style.display = "block";
+    bn.textContent = nDone === R.targets.length ? `MISSION COMPLETE: all ${nDone} targets neutralized` : `${nDone} of ${R.targets.length} targets neutralized`;
+  }
+  else if (done) { bn.className = ""; bn.textContent = "MISSION COMPLETE: target neutralized by " + done.text.match(/by (\w+)/)[1]; bn.style.display = "block"; }
   else if (logged) { bn.className = ""; bn.textContent = "TARGET LOGGED by " + logged.actor; bn.style.display = "block"; }
   else if (cancelled) { bn.className = "warn"; bn.textContent = "TASK CANCELLED: " + cancelled.text.replace(/^\s*[\d.]+\s*/, ""); bn.style.display = "block"; }
   else bn.style.display = "none";
@@ -606,7 +666,11 @@ function renderPanel(f, i) {
     h += `<tr><td><b style="color:${MODE_COLOURS[mode]}">${d.id}</b></td><td>${a[6] ? "parked home" : MODE_SHORT[mode]}${f.owner === d.id ? " (owner)" : ""}</td>` +
          `<td><div class="bar" style="width:70px;display:inline-block;vertical-align:middle"><i style="width:${pct}%;background:${pct < 20 ? "#ff5a5a" : "#78e68c"}"></i></div> ${pct}%</td><td>${Math.round(a[2])} m</td></tr>`;
   });
-  h += "</table><h3>Target</h3>" + R.target_states[f.ts].replace("_", " ") +
+  if (P.multi) {
+    h += "</table><h3>Targets</h3>" + f.tv.map((v, k) => `<div><b>${k + 1}</b> ${R.target_states[v[0]].replace("_", " ")}` +
+      (v[1] ? ` &middot; owner <b>${v[1]}</b>` : "") + (v[2] !== null ? ` &middot; lock <b>${v[2].toFixed(1)}</b> s` : "") +
+      (f.nz[k] ? ' &middot; <b style="color:#ff6b6b">NEUTRALIZED</b>' : "") + "</div>").join("");
+  } else h += "</table><h3>Target</h3>" + R.target_states[f.ts].replace("_", " ") +
        (f.owner ? ` &middot; owner <b>${f.owner}</b>` : "") + (f.lock !== null ? ` &middot; lock <b>${f.lock.toFixed(1)}</b> s` : "") +
        (f.neutralized ? ' &middot; <b style="color:#ff6b6b">NEUTRALIZED</b>' : "");
   const al = [...R.allocations].reverse().find(a => a.t <= t);
@@ -632,7 +696,9 @@ function renderPanel(f, i) {
   if (t >= R.t_end - 0.01) {
     const s = R.summary, row = s.target_log[0];
     h += "<h3>Result</h3>";
-    if (row) h += `<div>Final state <b>${row.final_state}</b>${row.owner ? ", owner <b>" + row.owner + "</b>" : ""}` +
+    if (P.multi) h += s.per_target.map((r, k) => `<div>Target <b>${k + 1}</b>: <b>${r.state}</b>${r.owner ? ", owner <b>" + r.owner + "</b>" : ""}` +
+      (r.logged_at != null ? `, logged at ${r.logged_at.toFixed(1)} s` : "") + ".</div>").join("");
+    else if (row) h += `<div>Final state <b>${row.final_state}</b>${row.owner ? ", owner <b>" + row.owner + "</b>" : ""}` +
       (row.logged_at != null ? `, logged at ${row.logged_at.toFixed(1)} s after ${row.inspection_duration.toFixed(0)} s of lock` : "") +
       (row.cancel_reason ? `, reason: ${row.cancel_reason.replace(/_/g, " ")}` : "") + `.</div>`;
     h += `<div class="hint">Matches the best possible choice: ${s.baseline_match.length ? (s.baseline_match.every(Boolean) ? "yes" : "no") : "n/a"}. ` +

@@ -644,3 +644,15 @@ config key; to get the old behaviour back set `allocation.max_queue: 1`, `alloca
 
 New event type `TASK_QUEUED`. A drone that wins a second target it has no room for gives it back without being excluded from the re-auction
 (new `exclude_owner` flag in the target-state transition context, default `true` = old behaviour for every other release).
+
+
+## Web map: several targets at once
+
+On the map page, place the first target, press **+ Add another target** and click each further spot (up to 8 targets in
+all, at least 60 m apart; "Remove extra targets" clears them). Press **Run**: all targets are announced at the same moment
+and the drones bid for them together. A drone that is already busy keeps the next target in its queue
+(`allocation.max_queue`) and flies straight on to it, so with 3 targets and 4 drones you normally see 3 different drones
+take one each. The panel lists every target (state, owner, lock, neutralized), the banner counts neutralized targets, and
+the Result section reports each target. API: `POST /api/run` accepts `targets: [{lat, lon, at?}]` instead of `target`
+(`at` = seconds after the first cue, default 0); the answer then has `targets`, per-frame `tv` / `nz` and
+`summary.per_target`. A request with a single `target` behaves exactly as before.

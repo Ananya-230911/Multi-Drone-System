@@ -7,13 +7,14 @@ between them. Coordinates are returned as latitude / longitude.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from src.config import ConfigError
 from src.sim.world import World
 from src.viz.describe import describe
 from src.webmap.geo import GeoFrame
-from src.webmap.scenario_builder import RequestError, build_config
+from src.webmap.scenario_builder import RequestError, build_config, target_list
 
 FRAME_S = 0.5
 AFTER_DONE_S = 12.0  # keep recording this long after the mission ends (drone flies home)
@@ -29,11 +30,14 @@ TARGET_STATES = ["NONE", "DETECTED", "CONFIRMED", "ALLOCATED", "ENROUTE", "TRACK
                  "LOGGED", "COMPLETED", "CANCELLED"]  # fmt: skip
 
 
-def _target_view(snap) -> tuple[str, str | None, str | None, float | None, tuple | None]:
-    """(state, target id, owner, lock seconds, est position) of the most relevant record, from the drones' views."""
+def _target_view(snap, near: tuple | None = None) -> tuple[str, str | None, str | None, float | None, tuple | None]:
+    """(state, target id, owner, lock seconds, est position) of the most relevant record, from the drones' views.
+    With `near` (x, y): only records within 100 m of that point (one of several targets)."""
     best = None
     for d in snap.drones:
         for tv in d.targets:
+            if near is not None and math.dist(tv.est_pos, near) > 100.0:
+                continue
             # live drones only (a failed drone's view is frozen), newest allocation round first
             rank = (d.mode != "FAILED", tv.epoch, tv.owner == d.id, tv.state != "CANCELLED", tv.created_at)
             if best is None or rank > best[0]:
@@ -53,6 +57,8 @@ def run(req: dict) -> dict[str, Any]:
     except ConfigError as exc:
         raise RequestError(f"the scenario is not valid: {exc}") from exc
     ids = [d.id for d in sorted(cfg.drones, key=lambda d: d.id)]
+    tl = target_list(req)
+    gts = [tuple(t.pos) for t in cfg.targets]  # metres, same order as the request's targets
     frames: list[dict] = []
     seen = 0
     done_at: float | None = None
@@ -65,11 +71,11 @@ def run(req: dict) -> dict[str, Any]:
                 done_at = w.t
         seen = len(recs)
         if w.tick % every == 0 or w.tick == 1:
-            frames.append(_frame(w, fr))
+            frames.append(_frame(w, fr, gts))
         if done_at is not None and w.t >= done_at + AFTER_DONE_S:
             break
     if not frames or frames[-1]["t"] < w.t - 1e-9:
-        frames.append(_frame(w, fr))
+        frames.append(_frame(w, fr, gts))
     return {
         "frame_s": FRAME_S,
         "drone_ids": ids,
@@ -80,23 +86,32 @@ def run(req: dict) -> dict[str, Any]:
         "allocations": _allocations(w),
         "routes": _routes(w, fr),
         "zones": [[list(fr.to_latlon(*p)) for p in z.raw.exterior.coords[:-1]] for z in w.fence.zones],
-        "target": {"lat": req["target"]["lat"], "lon": req["target"]["lon"]},
+        "target": {"lat": tl[0]["lat"], "lon": tl[0]["lon"]},
+        "targets": [{"lat": t["lat"], "lon": t["lon"], "at": t["at"]} for t in tl],
         "area_m": [round(fr.width), round(fr.h)],
-        "summary": _summary(w),
+        "summary": _summary(w, gts),
         "t_end": w.t,
     }
 
 
-def _frame(w: World, fr: GeoFrame) -> dict:
+def _frame(w: World, fr: GeoFrame, gts: list) -> dict:
     snap = w.snapshot
-    state, tid, owner, lock, est = _target_view(snap)
+    state, tid, owner, lock, est = _target_view(snap, gts[0] if len(gts) > 1 else None)
     drones = []
     for d in snap.drones:
         lat, lon = fr.to_latlon(d.x, d.y)
         drones.append([round(lat, 7), round(lon, 7), round(d.alt, 1), MODES.index(d.mode), round(d.battery_pct, 4),
                        round(d.r_eff, 1), 1 if d.docked else 0])  # fmt: skip
     gt = snap.ground_truth[0] if snap.ground_truth else None
+    extra = {}
+    if len(gts) > 1:  # several targets: state, owner and lock per target, and which are already neutralized
+        tv = []
+        for g in gts:
+            st, _, ow, lk, _ = _target_view(snap, g)
+            tv.append([TARGET_STATES.index(st), ow, None if lk is None else round(lk, 1)])
+        extra = {"tv": tv, "nz": [bool(x.neutralized) for x in snap.ground_truth]}
     return {
+        **extra,
         "t": round(w.t, 2), "d": drones, "ts": TARGET_STATES.index(state), "owner": owner,
         "lock": None if lock is None else round(lock, 1), "neutralized": bool(gt and gt.neutralized),
         "gt_visible": bool(gt and gt.visible),
@@ -160,7 +175,19 @@ def _routes(w: World, fr: GeoFrame) -> list[dict]:
     return out
 
 
-def _summary(w: World) -> dict:
+def _per_target(w: World, rows: list[dict], gts: list) -> list[dict]:
+    """One line per requested target: how it ended (the best log row within 100 m of it) and when it was neutralized."""
+    out = []
+    nz = {e["data"].get("ground_truth"): e["t"] for e in w.log.of_type("TARGET_NEUTRALIZED")}
+    for g, truth in zip(gts, w.ground_truth.targets):
+        near = [r for r in rows if math.dist((r["est_x"], r["est_y"]), g) <= 100.0]
+        best = next((r for r in near if r["final_state"] == "COMPLETED"), near[-1] if near else None)
+        out.append({"state": best["final_state"] if best else "NOT_DETECTED", "owner": best["owner"] if best else None,
+                    "logged_at": best["logged_at"] if best else None, "neutralized_at": nz.get(truth.id)})  # fmt: skip
+    return out
+
+
+def _summary(w: World, gts: list) -> dict:
     rows = w.target_log_rows()
     base = w.baseline_results()
     return {
@@ -174,4 +201,5 @@ def _summary(w: World) -> dict:
         "separation_violations": len(w.separation_violations),
         "messages": dict(w.network.stats),
         "neutralized": [e["data"] for e in w.log.of_type("TARGET_NEUTRALIZED")],
+        "per_target": _per_target(w, rows, gts),
     }

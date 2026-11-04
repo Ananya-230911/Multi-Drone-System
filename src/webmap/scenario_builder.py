@@ -5,6 +5,8 @@ Request (JSON) fields:
                 each side 800 m to 12 km
     center, size_m   alternative to `bounds`: a square of size_m metres (800 to 12000) around `center`
     target      {lat, lon}   where the target is
+    targets     [{lat, lon, at?}]   alternative to `target`: 1 to 8 targets given at once (`at` = seconds after the first
+                cue, default 0, so "two commands at a time" is simply two targets). Each must be 60 m or more from the others.
     zones       [{id?, corners: [{lat, lon}, {lat, lon}]}]   optional no-fly rectangles
     drones      [{id, lat, lon, alt, battery_pct, sensor_radius, fail_at?}]   2 to 6 drones
                 (fail_at: simulated failure time in seconds, to show the others taking over)
@@ -29,6 +31,9 @@ CRUISE_SPEED = 15.0  # m/s, only used to size the default simulation length
 EDGE_CLEARANCE = 120.0  # metres from the area edge: boundary inset + margin + patrol loop
 PATROL_HALF = 40.0  # half side of each drone's small holding loop, metres
 MAX_DRONES = 6
+MAX_TARGETS = 8
+MIN_TARGET_GAP = 60.0  # metres; closer targets would be merged into one record by the drones
+CUE_T0 = 5.0  # seconds: when the first cue reaches the drones
 
 
 class RequestError(ValueError):
@@ -73,6 +78,22 @@ def frame_of(req: dict) -> GeoFrame:
     return fr
 
 
+def target_list(req: dict) -> list[dict]:
+    """The requested targets as [{lat, lon, at}]: `targets` when given, else the single `target`."""
+    raw = req.get("targets")
+    if raw is None:
+        return [{**req.get("target", {}), "at": 0.0}] if isinstance(req.get("target"), dict) else []
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_TARGETS:
+        raise RequestError(f"between 1 and {MAX_TARGETS} targets are needed")
+    out = []
+    for i, t in enumerate(raw):
+        if not isinstance(t, dict):
+            raise RequestError(f"target {i + 1} is malformed")
+        at = _num(t, "at", 0.0, 600.0, f"target {i + 1}") if t.get("at") not in (None, "") else 0.0
+        out.append({"lat": t.get("lat"), "lon": t.get("lon"), "at": at})
+    return out
+
+
 def build_dict(req: dict) -> tuple[dict[str, Any], GeoFrame]:
     if not isinstance(req, dict):
         raise RequestError("request must be a JSON object")
@@ -81,9 +102,21 @@ def build_dict(req: dict) -> tuple[dict[str, Any], GeoFrame]:
     inside = lambda x, y: (EDGE_CLEARANCE <= x <= width - EDGE_CLEARANCE  # noqa: E731
                            and EDGE_CLEARANCE <= y <= height - EDGE_CLEARANCE)  # fmt: skip
 
-    tx, ty = fr.to_xy(*_point(req.get("target"), "target"))
-    if not (20.0 <= tx <= width - 20.0 and 20.0 <= ty <= height - 20.0):
-        raise RequestError("the target is outside the operating area (or too close to its edge)")
+    tlist = target_list(req)
+    if not tlist:
+        raise RequestError("target is missing")
+    txy: list[tuple[float, float]] = []
+    for i, t in enumerate(tlist):
+        what = "target" if len(tlist) == 1 else f"target {i + 1}"
+        x, y = fr.to_xy(*_point(t, what))
+        if not (20.0 <= x <= width - 20.0 and 20.0 <= y <= height - 20.0):
+            raise RequestError(f"the {what} is outside the operating area (or too close to its edge)")
+        for j, (px, py) in enumerate(txy):
+            if ((x - px) ** 2 + (y - py) ** 2) ** 0.5 < MIN_TARGET_GAP:
+                raise RequestError(f"target {i + 1} is closer than {MIN_TARGET_GAP:.0f} m to target {j + 1}; the drones "
+                                   "would treat them as one target")  # fmt: skip
+        txy.append((x, y))
+    tx, ty = txy[0]
 
     drones_in = req.get("drones")
     if not isinstance(drones_in, list) or not 2 <= len(drones_in) <= MAX_DRONES:
@@ -130,7 +163,7 @@ def build_dict(req: dict) -> tuple[dict[str, Any], GeoFrame]:
         raise RequestError("mode must be 'neutralize' or 'inspect'")
     diag = (width ** 2 + height ** 2) ** 0.5
     # Long enough for the farthest drone to fly there, lock on and fly home, with a margin.
-    auto = min(2400.0, max(300.0, 2.5 * diag / CRUISE_SPEED + 90.0))
+    auto = min(2400.0, max(300.0, 2.5 * diag / CRUISE_SPEED + 90.0 + 150.0 * (len(txy) - 1)))
     duration = _num(req, "duration", 30.0, 3600.0, "simulation") if "duration" in req else auto
     comm = max(1500.0, diag * 1.1)  # the radio covers the whole area
     seed = int(_num(req, "seed", 0, 2**31 - 1, "simulation")) if "seed" in req else 7
@@ -146,8 +179,10 @@ def build_dict(req: dict) -> tuple[dict[str, Any], GeoFrame]:
         "association": {"ignore_after_complete": 400},
         "drone_defaults": {"comm_range": comm},
         "drones": drones,
-        "targets": [{"id": "TARGET", "pos": [round(tx, 2), round(ty, 2)], "alt": 0, "appear_at": 0}],
-        "scenario_events": [{"t": 5, "type": "external_cue", "pos": [round(tx, 2), round(ty, 2)]}] + fail_events,
+        "targets": [{"id": "TARGET" if len(txy) == 1 else f"GT-{i + 1}", "pos": [round(x, 2), round(y, 2)], "alt": 0,
+                     "appear_at": 0} for i, (x, y) in enumerate(txy)],
+        "scenario_events": [{"t": CUE_T0 + t["at"], "type": "external_cue", "pos": [round(x, 2), round(y, 2)]}
+                            for t, (x, y) in zip(tlist, txy)] + fail_events,
     }
     return cfg, fr
 
