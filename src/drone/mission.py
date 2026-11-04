@@ -347,7 +347,7 @@ class MissionMixin:
 
     def _free_return(self: "Drone") -> bool:
         """Flying back to the patrol loop (not home for its battery), or on its way to its next queued task: free to take new work."""
-        return self.state.mode is DroneMode.RETURNING and self._then == "patrol"
+        return self.state.mode is DroneMode.RETURNING and (self._then == "patrol" or self.state.current_task is not None)
 
     def _accept_win(self: "Drone", now: float, tid: str, epoch: int) -> None:
         """This drone won `tid`. An idle drone starts on it; a busy one re-checks the task against what it holds NOW

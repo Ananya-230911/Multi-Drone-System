@@ -221,3 +221,16 @@ def test_release_for_lack_of_room_does_not_use_up_max_reallocations():
     rec.owner = "D1"; rec.state = TargetState.ALLOCATED
     apply_transition(rec, TargetState.DETECTED, TransitionContext("D1", 3.0, trigger="release", max_reallocations=2), "fault")
     assert rec.reallocations == 1 and rec.excluded == {2: "D1"}
+
+
+def test_a_drone_chaining_to_its_next_task_still_takes_new_work_that_tick():
+    """Regression: for one tick after a task ends the chaining drone is RETURNING with its next task already set."""
+    w = run(scenario(2, [(5.0, TARGETS[0]), (5.0, TARGETS[1]), (5.0, TARGETS[2])]))
+    assert logged(w) == {0, 1, 2}
+    from src.drone.fsm import DroneMode
+
+    d = w.drones["D1"]
+    d.state.mode, d._then, d.state.current_task = DroneMode.RETURNING, "hover", "T-EXT-001"
+    assert d._free_return()
+    d.state.current_task = None
+    assert not d._free_return()  # heading home (or hovering) with nothing to do is not free
