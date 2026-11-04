@@ -119,6 +119,11 @@ class Tracker:
             for rec in self.records.values()
         )
 
+    def on_completed_site(self, rec: TargetRecord) -> bool:
+        """Is `rec` another record of a target that has already been logged as COMPLETED (same place, any age)?"""
+        return any(o.id != rec.id and o.state is TargetState.COMPLETED and math.dist(o.est_pos, rec.est_pos) <= self.assoc.radius
+                   for o in self.records.values())  # fmt: skip
+
     def _create(self, obs: AgentObservation, now: float) -> tuple[TargetRecord, TransitionEvent]:
         self._seq += 1
         creator = "EXT" if obs.source == "external_cue" else self.owner_id

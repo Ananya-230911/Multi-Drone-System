@@ -269,6 +269,8 @@ class CoordinationMixin:
         rec = self.tracker.record(tid)
         if rec is None or rec.terminal:
             return False
+        if self.shared.allocation.skip_completed_sites and self.tracker.on_completed_site(rec):
+            return False  # the target here was already inspected and logged
         return rec.state is TargetState.CONFIRMED or (rec.state is TargetState.DETECTED and rec.is_cue)
 
     def _maybe_start_auction(self: "Drone", now: float, tid: str) -> None:

@@ -144,6 +144,7 @@ class AllocationConfig:
     consensus_rounds: int = 3
     allocation_timeout: float = 10.0
     max_reallocations: int = 2
+    skip_completed_sites: bool = True  # never auction a new record that sits on an already completed target
 
     def validate(self, p: str) -> None:
         self.weights.validate(f"{p}.weights")
