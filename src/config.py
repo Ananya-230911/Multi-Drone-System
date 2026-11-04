@@ -145,6 +145,10 @@ class AllocationConfig:
     allocation_timeout: float = 10.0
     max_reallocations: int = 2
     skip_completed_sites: bool = True  # never auction a new record that sits on an already completed target
+    max_queue: int = 4  # tasks one drone may hold (the active one plus queued); 1 = the old single-task behaviour
+    retry_unassigned: bool = True  # an auction without feasible bidder is retried instead of cancelling the target
+    retry_period: float = 10.0  # seconds between such retries
+    retry_max_s: float = 600.0  # give up (cancel as before) when no drone could take it for this long
 
     def validate(self, p: str) -> None:
         self.weights.validate(f"{p}.weights")
@@ -152,6 +156,9 @@ class AllocationConfig:
         _positive(self.consensus_rounds, f"{p}.consensus_rounds")
         _positive(self.allocation_timeout, f"{p}.allocation_timeout")
         _non_negative(self.max_reallocations, f"{p}.max_reallocations")
+        _positive(self.max_queue, f"{p}.max_queue")
+        _positive(self.retry_period, f"{p}.retry_period")
+        _non_negative(self.retry_max_s, f"{p}.retry_max_s")
 
 
 @dataclass(frozen=True)

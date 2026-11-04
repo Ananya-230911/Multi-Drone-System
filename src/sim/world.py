@@ -227,14 +227,15 @@ class World:
             key = (alias.get(ev["target_id"], ev["target_id"]), ev["epoch"])
             committed.setdefault(key, {})[ev["actor"]] = ev["data"]["winner"]
         planner = Planner(self.fence, self.cfg.navigation.cruise_alt, self.cfg.navigation.planner_clearance)
-        cost_cfg = CostConfig(self.cfg.allocation.weights, self.cfg.inspection, self.cfg.confidence)
+        cost_cfg = CostConfig(self.cfg.allocation.weights, self.cfg.inspection, self.cfg.confidence, self.cfg.allocation.max_queue)
         params = {d.id: d.params for d in self.cfg.drones}
         out = []
         for (tid, epoch), start in sorted(self.allocation_starts.items(), key=lambda kv: kv[1]["t"]):
             key = (alias.get(tid, tid), epoch)
             bidders = [
                 BidderState(v.id, (v.x, v.y, v.alt), v.battery_wh, params[v.id], v.home, v.mode, v.docked,
-                            busy=v.current_task is not None and alias.get(v.current_task, v.current_task) != key[0])
+                            busy=v.current_task is not None and alias.get(v.current_task, v.current_task) != key[0],
+                            stops=v.stops)
                 for v in start["drones"] if v.mode != "FAILED"
             ]  # fmt: skip
             winner, bids = optimal(bidders, key[0], start["target_est"], planner, cost_cfg)

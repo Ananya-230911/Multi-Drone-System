@@ -134,6 +134,8 @@ class DroneView:
     auctions: tuple["AuctionView", ...] = ()
     yielding_to: str | None = None
     mission_point: Point3 | None = None
+    queue: tuple[str, ...] = ()  # queued target IDs (allocation.max_queue > 1)
+    stops: tuple = ()  # allocation.cost.Stop of everything held, for the evaluation-only baseline
 
 
 @dataclass(frozen=True)
@@ -262,6 +264,7 @@ class Drone(CoordinationMixin, MissionMixin):
                 "e_home_wh": e_home, "reserve_wh": self.battery.reserve_wh,
             })  # fmt: skip
             self.hold_target = None
+            self._release_queue(now, "battery_reserve")
             if s.current_task is not None:
                 self._release(now, "battery_reserve")  # RELEASE first (6.4), then home
             if s.mode is not DroneMode.RETURNING:
@@ -569,6 +572,7 @@ class Drone(CoordinationMixin, MissionMixin):
             auctions=tuple(self._auction_view(tid) for tid in sorted(self.auction.entries)),
             yielding_to=self._yielding_to,
             mission_point=self.mission.point if self.mission else None,
+            queue=tuple(t for t, _ in self.queue), stops=self._stops() if self.shared.allocation.max_queue > 1 else (),
         )  # fmt: skip
 
     def _auction_view(self, tid: str) -> AuctionView:

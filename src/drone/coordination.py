@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from src.allocation.auction import Action, Auction
-from src.allocation.cost import BidderState, CostConfig, evaluate
+from src.allocation.cost import TRANSIENT_QUEUE, TRANSIENT_SINGLE, BidderState, CostConfig, evaluate
 from src.comms.messages import Message, Outbox
 from src.safety.monitor import PeerTrack
 from src.tracking.observation import AgentObservation, validate
@@ -58,8 +58,10 @@ class CoordinationMixin:
         self.last_alive: dict[str, float] = {}  # newest evidence each peer was alive: direct or gossiped heartbeat time
         self._reopened: set[tuple[str, int]] = set()
         self.auction = Auction(self.id, sh.allocation)
-        self._cost_cfg = CostConfig(sh.allocation.weights, sh.inspection, sh.confidence)
+        self._cost_cfg = CostConfig(sh.allocation.weights, sh.inspection, sh.confidence, sh.allocation.max_queue)
         self._yielding_to: str | None = None
+        self._retry_at: dict[str, float] = {}  # target -> next auction retry (allocation.retry_unassigned)
+        self._retry_first: dict[str, float] = {}  # target -> when its first auction found no feasible bidder
 
     # ------------------------------------------------------------------ peers
 
@@ -281,9 +283,13 @@ class CoordinationMixin:
         e = self.auction.entry(tid)
         if e is not None and e.epoch >= rec.epoch:
             return
+        if self._retry_at.get(tid, -1.0) > now:
+            return  # no drone could take it a moment ago: try again later
         s = self.state
+        stops = self._stops() if self.shared.allocation.max_queue > 1 else ()
         bidder = BidderState(self.id, s.pos3, self.battery.charge_wh, s.params, s.home, s.mode.value, self.docked,
-                             busy=s.current_task is not None and s.current_task != tid)  # fmt: skip
+                             busy=s.current_task is not None and s.current_task != tid, stops=stops,
+                             free_return=self._free_return())  # fmt: skip
         bid = evaluate(bidder, tid, rec.est_pos, self.planner, self._cost_cfg, excluded=rec.excluded.get(rec.epoch) == self.id)
         self._emit(now, "BID_COMPUTED", {
             "feasible": bid.feasible, "bid": bid.value, "reason": bid.reason, "target_est": list(rec.est_pos),
@@ -375,8 +381,7 @@ class CoordinationMixin:
             except IllegalTransition as exc:
                 self._emit(now, "ILLEGAL_TRANSITION", {"to": "ALLOCATED", "error": str(exc)}, target_id=tid, epoch=e.epoch)
         if a.winner == self.id:
-            self.state.current_task = tid
-            self.state.task_epoch = e.epoch
+            self._accept_win(now, tid, e.epoch)
         self._send_commit(now, tid)
 
     def _act_resend_commit(self: "Drone", now: float, a: Action) -> None:
@@ -386,10 +391,20 @@ class CoordinationMixin:
         tid = a.target_id
         rec = self.tracker.record(tid)
         e = self.auction.entry(tid)
-        self._emit(now, "ALLOCATION_FAILED", {
-            "reason": "no_feasible_bidders",
-            "bids": {d: {"feasible": b.feasible, "reason": b.reason} for d, b in sorted(e.bids.items())},
-        }, target_id=tid, epoch=e.epoch)  # fmt: skip
+        al = self.shared.allocation
+        first = self._retry_first.setdefault(tid, now)
+        transient = TRANSIENT_QUEUE if al.max_queue > 1 else TRANSIENT_SINGLE
+        retry = (al.retry_unassigned and rec is not None and not rec.terminal and now - first < al.retry_max_s
+                 and any(b.reason in transient for b in e.bids.values()))  # fmt: skip
+        if not retry:  # while it is being retried the BID_COMPUTED events show why nobody could take it
+            self._emit(now, "ALLOCATION_FAILED", {
+                "reason": "no_feasible_bidders",
+                "bids": {d: {"feasible": b.feasible, "reason": b.reason} for d, b in sorted(e.bids.items())},
+            }, target_id=tid, epoch=e.epoch)  # fmt: skip
+        if retry:
+            self._retry_at[tid] = now + al.retry_period
+            self.auction.entries.pop(tid, None)  # the next auction for it starts from scratch (same epoch)
+            return
         if rec is not None and not rec.terminal:
             ctx = TransitionContext(actor=self.id, now=now, trigger="allocation_timeout")
             try:

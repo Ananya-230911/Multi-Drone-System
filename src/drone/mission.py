@@ -28,7 +28,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from src.allocation.cost import inspection_standoff
+from src.allocation.cost import BidderState, Stop, evaluate, inspection_standoff
 from src.drone.fsm import MISSION, DroneMode
 from src.drone.sensor import effective_radius
 from src.logging_.target_log import LogEntry
@@ -85,6 +85,7 @@ class MissionMixin:
     def _init_mission(self: "Drone") -> None:
         self.mission: Mission | None = None
         self.logbook: list[LogEntry] = []
+        self.queue: list[tuple[str, int]] = []  # tasks won while busy (target, epoch), flown one after another
 
     # ------------------------------------------------------------------ per tick
 
@@ -99,7 +100,8 @@ class MissionMixin:
                 self._end_mission(now, "ownership_lost" if rec is not None and not rec.terminal else "task_ended")
                 return True
             return False
-        if s.mode in (DroneMode.PATROL, DroneMode.CONFIRM_HOLD) and rec.state is S.ALLOCATED and self.mission is None:
+        if s.mode in (DroneMode.PATROL, DroneMode.CONFIRM_HOLD, DroneMode.RETURNING) and rec.state is S.ALLOCATED \
+                and self.mission is None:  # RETURNING: straight on to the next queued task  # fmt: skip
             self._start_mission(now, rec)
             return True
         if self.mission is None:
@@ -301,6 +303,11 @@ class MissionMixin:
     def _release(self: "Drone", now: float, reason: str, detail: str = "") -> None:
         """Give the task back (row 16): epoch + 1, this drone excluded; or cancel when reopens run out."""
         tid = self.state.current_task
+        if tid:
+            self._release_target(now, tid, reason, detail)
+        self._end_mission(now, f"released:{reason}")
+
+    def _release_target(self: "Drone", now: float, tid: str, reason: str, detail: str = "") -> None:
         rec = self.tracker.record(tid) if tid else None
         if rec is not None and not rec.terminal:
             to = S.DETECTED if rec.is_cue else S.CONFIRMED
@@ -314,13 +321,92 @@ class MissionMixin:
             else:
                 self._emit(now, "REALLOCATION", {"reason": reason, "detail": detail, "released_by": self.id,
                                                  "new_epoch": rec.epoch}, target_id=rec.id, epoch=rec.epoch)  # fmt: skip
-        self._end_mission(now, f"released:{reason}")
+
+    # ------------------------------------------------------------------ task queue (allocation.max_queue > 1)
+
+    def _queued_ok(self: "Drone", tid: str, epoch: int):
+        rec = self.tracker.record(tid)
+        ok = rec is not None and not rec.terminal and rec.owner == self.id and rec.epoch == epoch and rec.state is S.ALLOCATED
+        return rec if ok else None
+
+    def _stops(self: "Drone") -> tuple[Stop, ...]:
+        """The tasks this drone holds, active one first, as the bid function needs them."""
+        s, insp = self.state, self.shared.inspection
+        out: list[Stop] = []
+        rec = self.tracker.record(s.current_task) if s.current_task else None
+        if rec is not None and not rec.terminal and rec.owner == self.id:
+            m = self.mission
+            on = m is not None and m.target_id == rec.id
+            out.append(Stop(rec.est_pos, max(insp.duration - m.accum, 0.0) if on else insp.duration,
+                            m.point if on else None, True))  # fmt: skip
+        for tid, epoch in self.queue:
+            r = self._queued_ok(tid, epoch)
+            if r is not None:
+                out.append(Stop(r.est_pos, insp.duration))
+        return tuple(out)
+
+    def _free_return(self: "Drone") -> bool:
+        """Flying back to the patrol loop (not home for its battery) with no task: free to take new work."""
+        return self.state.mode is DroneMode.RETURNING and self._then == "patrol" and self.state.current_task is None
+
+    def _accept_win(self: "Drone", now: float, tid: str, epoch: int) -> None:
+        """This drone won `tid`. An idle drone starts on it; a busy one re-checks the task against what it holds NOW
+        (the bid was computed earlier) and queues it, or gives it back so the others can re-auction it."""
+        s = self.state
+        if s.current_task in (None, tid):
+            s.current_task, s.task_epoch = tid, epoch
+            return
+        if any(q == tid for q, _ in self.queue):
+            return
+        reason = "queue_full"
+        al = self.shared.allocation
+        rec = self.tracker.record(tid)
+        stops = self._stops()
+        if al.max_queue > 1 and len(stops) < al.max_queue and rec is not None:
+            bidder = BidderState(self.id, s.pos3, self.battery.charge_wh, s.params, s.home, s.mode.value, self.docked,
+                                 busy=True, stops=stops, free_return=self._free_return())  # fmt: skip
+            bid = evaluate(bidder, tid, rec.est_pos, self.planner, self._cost_cfg)
+            if bid.feasible:
+                pos = max(bid.breakdown["insert_at"] - (1 if stops and stops[0].active else 0), 0)
+                self.queue.insert(min(pos, len(self.queue)), (tid, epoch))
+                self._emit(now, "TASK_QUEUED", {"position": pos, "held": len(stops) + 1, "cost": bid.breakdown["cost"]},
+                           target_id=tid, epoch=epoch)  # fmt: skip
+                return
+            reason = f"not_feasible_now:{bid.reason}"
+        elif al.max_queue <= 1:
+            reason = "busy"
+        self._release_target(now, tid, reason)
+
+    def _release_queue(self: "Drone", now: float, reason: str) -> None:
+        queued, self.queue = self.queue, []
+        for tid, epoch in queued:
+            if self._queued_ok(tid, epoch) is not None:
+                self._release_target(now, tid, reason)
+
+    def _take_next(self: "Drone", now: float) -> tuple[str, int] | None:
+        """Next queued task that is still ours and still affordable; the others are given back."""
+        s = self.state
+        while self.queue:
+            tid, epoch = self.queue.pop(0)
+            rec = self._queued_ok(tid, epoch)
+            if rec is None:
+                continue
+            bidder = BidderState(self.id, s.pos3, self.battery.charge_wh, s.params, s.home, "PATROL", self.docked)
+            if evaluate(bidder, tid, rec.est_pos, self.planner, self._cost_cfg).feasible:
+                return tid, epoch
+            self._release_target(now, tid, "no_longer_feasible")
+        return None
 
     def _end_mission(self: "Drone", now: float, reason: str) -> None:
         s = self.state
         self.mission = None
         s.current_task = None
-        if s.mode in MISSION:
+        nxt = self._take_next(now) if self.queue else None
+        if nxt is not None:  # fly straight on to the next task instead of going back to the patrol loop
+            s.current_task, s.task_epoch = nxt
+            if s.mode in MISSION:
+                self._set_mode(now, DroneMode.RETURNING, reason)
+        elif s.mode in MISSION:
             self._set_mode(now, DroneMode.RETURNING, reason)
             self._back_to_patrol(now)
         elif s.mode is DroneMode.SAFETY_HOLD and self._safety_prev in MISSION:

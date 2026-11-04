@@ -48,6 +48,8 @@ TRANSITIONS: dict[tuple[DroneMode | None, DroneMode], str] = {
     **{(m, M.SAFETY_HOLD): "monitor_hold_or_replan" for m in MOVING},
     **{(M.SAFETY_HOLD, m): "replan_succeeded" for m in MOVING},  # back to the previous mode
     (M.RETURNING, M.PATROL): "reached_home_or_patrol",
+    (M.RETURNING, M.ENROUTE): "next_queued_task_route_valid",  # allocation.max_queue > 1: no detour via patrol
+    (M.RETURNING, M.INSPECTING): "next_queued_task_already_in_position",
     (None, M.LANDED): "no_route_home_battery_critical",
     (None, M.FAILED): "scenario_failure",
 }
