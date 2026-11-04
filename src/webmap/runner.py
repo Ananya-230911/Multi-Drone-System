@@ -30,6 +30,22 @@ TARGET_STATES = ["NONE", "DETECTED", "CONFIRMED", "ALLOCATED", "ENROUTE", "TRACK
                  "LOGGED", "COMPLETED", "CANCELLED"]  # fmt: skip
 
 
+def _target_index(w: World, ev: dict, gts: list) -> int | None:
+    """Which requested target a TARGET_LOGGED / TASK_CANCELLED / ALLOCATION_FAILED event is about (nearest within 100 m)."""
+    d = ev.get("data", {})
+    pos = (d["est_x"], d["est_y"]) if d.get("est_x") is not None else None
+    if pos is None:
+        for ag in w.drones.values():
+            rec = ag.tracker.record(ev.get("target_id") or "")
+            if rec is not None:
+                pos = rec.est_pos
+                break
+    if pos is None:
+        return None
+    j = min(range(len(gts)), key=lambda i: math.dist(pos, gts[i]))
+    return j if math.dist(pos, gts[j]) <= 100.0 else None
+
+
 def _target_view(snap, near: tuple | None = None) -> tuple[str, str | None, str | None, float | None, tuple | None]:
     """(state, target id, owner, lock seconds, est position) of the most relevant record, from the drones' views.
     With `near` (x, y): only records within 100 m of that point (one of several targets)."""
@@ -62,12 +78,21 @@ def run(req: dict) -> dict[str, Any]:
     frames: list[dict] = []
     seen = 0
     done_at: float | None = None
+    resolved: set[int] = set()  # indices of the targets that have been logged, neutralized or cancelled
     every = max(1, round(FRAME_S / w.dt))
     while not w.finished:
         w._advance()
         recs = w.log.records
         for r in recs[seen:]:
-            if r["type"] in DONE_EVENTS and done_at is None:
+            if r["type"] not in DONE_EVENTS or done_at is not None:
+                continue
+            if len(gts) == 1:
+                done_at = w.t
+                continue
+            j = _target_index(w, r, gts)  # several targets: the run is over when every one of them has ended
+            if j is not None:
+                resolved.add(j)
+            if len(resolved) >= len(gts):
                 done_at = w.t
         seen = len(recs)
         if w.tick % every == 0 or w.tick == 1:
