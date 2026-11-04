@@ -24,6 +24,8 @@ There is no central controller: every drone runs the same code and reaches the s
 | AI crew | One sentence sets up the scenario (CrewAI + Groq) and an AI debrief explains the result | `src/crew` |
 | 5 | Owner failure and network-split scenarios, duplicate-owner detection, batch evaluation with metrics and plots | `config/drone_failure.yaml`, `config/partition.yaml`, `src/evaluate.py` |
 | Compare | Our auction vs nearest / most-battery / random / centralized optimum, plus literature comparison | `src/compare.py`, `docs/COMPARISON.md` |
+| Benchmark fixes | Task queue, commit-time re-check, retry, no re-inspection, direct chaining, failure handover (benchmark completion 61 % to 96 %) | `src/allocation/cost.py`, `src/drone/mission.py`, `docs/BENCHMARK_BEFORE_AFTER.md` |
+| Multi-target map | Several targets at once on the web map, command announcement and one bids table per target | `src/webmap/*` |
 
 ## 3. How the drones decide (the core)
 
@@ -46,6 +48,8 @@ Run: `python -m src.webmap` then open http://127.0.0.1:8000 (local only).
 - Search any place (OpenStreetMap), or type `lat, lon`.
 - Operating area: any rectangle 0.8 to 12 km per side (type width/height, or draw by 2 corners).
 - Target: **click anywhere inside the blue rectangle**, or type exact coordinates.
+- **Several targets at once:** after the first target press **+ Add another target** and click more spots (up to 8, at least 60 m
+  apart; "Remove extra targets" clears them). See section 4b.
 - Optional no-fly zone (2 corners).
 - Drone table: battery %, altitude, sensor radius, and "fail at" time (to demonstrate takeover).
 - Mode: neutralize (simulated) or inspect only.
@@ -54,6 +58,26 @@ Run: `python -m src.webmap` then open http://127.0.0.1:8000 (local only).
 
 How it works: the server runs the whole simulation, records a frame every 0.5 s, and the page replays it.
 `POST /api/run` takes the scenario (JSON) and returns frames, events, bids, routes, summary.
+
+## 4b. Several targets at once (web map)
+
+What happens when you give more than one target:
+
+1. **At 5 s the command goes out to every drone** at the same moment. The map draws a coloured ring at each new target and
+   dashed lines from it to every drone for about 3 s, and the banner says "COMMAND SENT to all N drones".
+2. **Each target gets its own bidding round.** The right panel shows one bids table per target ("BIDS - TARGET 1, 2, ...")
+   with its own winner. A target given a delay (`at`) is announced, and bid for, only at that later time.
+3. **The work is shared.** A drone that wins one target is usually not the best for the next; if a drone is already busy it
+   keeps the next target in its queue (`allocation.max_queue`) and flies straight to it. Example run: 3 targets, 4 drones,
+   3 different drones, all 3 neutralized, no geofence or separation violations.
+4. **Each target is shown separately:** numbered marker, its own lock line and explosion, a per-target line in the panel,
+   a banner counting "1 of 3 targets neutralized", and a per-target Result section.
+5. **The run lasts until every target has ended** (logged, neutralized or cancelled), not until the first one does (a bug in
+   the first version cut the recording 12 s after the first target; fixed).
+
+API: `POST /api/run` accepts `targets: [{lat, lon, at?}]` instead of `target`; the answer then also has `targets` (with
+`cue_t`), per-frame `tv` (state, owner, lock per target) and `nz` (neutralized flags), `summary.per_target`, and each bid
+round carries `target_index`. A request with a single `target` is unchanged.
 
 ## 5. The AI crew
 
@@ -109,6 +133,29 @@ retried, finished drones fly straight to their next target, and a target that wa
 again. The old behaviour is restored exactly with `max_queue: 1`, `retry_unassigned: false`,
 `skip_completed_sites: false`. Before/after numbers: `docs/BENCHMARK_BEFORE_AFTER.md`.
 
+Benchmark result (4 drones, 8 targets arriving every 20 s, 420 runs per version, 20 seeds):
+
+| Measure | Before | After |
+|---|---|---|
+| Task completion | 61 % | 96 % |
+| All targets all at start | 45 % | 96 % |
+| Missions fully completed (seeds 1-10) | 0 / 10 | 7 / 10 (10 / 10 counting only targets outside the no-fly zone) |
+| Completion at 30 % packet loss | 60 % | 96 % (same as 0 %) |
+| 2 drones, 1 fails | 19 % | 95 % |
+| Double-assignment overwrites (240 replays) | 81 runs | 0 |
+| Geofence violations | 0 | 0 |
+| Messages per completed target | 560 | 214 |
+
+Also fixed on the way: a cue that merged into a drone's own detection was later cancelled and lost; a drone that gave a task
+back only for lack of room was excluded from the re-auction and used up the reallocation budget (stranding tasks when it was
+the last drone); a drone chaining to its next task refused bids for one tick.
+
+Honest notes: the benchmark harness inherits the simulator's default no-fly zone, and 9 of 160 target placements lie inside
+or on its edge, so 8 / 10 fully completed missions cannot be reached without changing the benchmark; with 2 drones separation
+violations rose from 0 to 4 (two targets 25 m apart, or a failed drone frozen in the air); adaptive heartbeats (to cut the
+message count further) were not done; a drone sent to a target on the edge of a no-fly zone can hover there without ever
+completing or timing out (1 of 240 replays).
+
 ## 6. Setup
 
 Plain simulation: Python 3.10+ (3.14 works with `pygame-ce`).
@@ -147,14 +194,14 @@ PLAN.md            the original plan / specification
 
 ## 8. Testing
 
-About 406 tests: unit tests (cost, consensus, network, geofence, planner, webmap, crew) and simulation tests per phase
+About 454 tests: unit tests (cost, consensus, network, geofence, planner, webmap, crew) and simulation tests per phase
 (including decentralization checks, i.e. drones decide without a central controller). The crew agents are tested with a
 scripted fake model, so no key or network is needed. Browser behaviour was checked with automated Playwright runs.
 
 ## 9. Limits (be honest in the viva)
 
 - Simulation only; simple point-mass drone dynamics and a flat-earth coordinate conversion (accurate to metres over km).
-- Single target at a time in the web map; radio model is a simple loss/delay model.
+- The web map takes up to 8 targets at once (at least 60 m apart); a target inside a no-fly zone cannot be inspected. The radio model is a simple loss/delay model.
 - Map tiles and place search need internet; the AI crew needs internet and a Groq key.
 - The AI model proposes numbers; they are validated, but it is a planning aid, not part of the safety logic.
 - If the network heals only after both owners already hover over the target, one separation violation is recorded (target still logged once).
