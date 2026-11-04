@@ -181,6 +181,8 @@ class Tracker:
             s.confirmation = Confirmation.CONFIRMED
             s.confirmed_at = min(t for t in (s.confirmed_at, a.confirmed_at) if t is not None)
         s.created_at = min(s.created_at, a.created_at)
+        if a.source == "external_cue":
+            s.source = "external_cue"  # an announced target stays allocatable and is not timed out as an unconfirmed detection
         s.aliases |= a.aliases | {alias_id}
         if a.t_last_obs is not None and (s.t_last_obs is None or a.t_last_obs > s.t_last_obs):
             s.t_last_obs, s.last_confidence = a.t_last_obs, a.last_confidence

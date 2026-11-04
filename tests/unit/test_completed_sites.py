@@ -28,3 +28,13 @@ def test_other_places_are_not_completed_sites():
 def test_skip_completed_sites_key_defaults_on_and_can_be_switched_off():
     assert AllocationConfig().skip_completed_sites is True
     assert AllocationConfig(skip_completed_sites=False).skip_completed_sites is False
+
+
+def test_cue_merged_into_a_sensor_record_keeps_the_record_allocatable():
+    """A cue that arrives while a drone's own sensor already sees the target must not be lost when the two merge."""
+    tr = tracker()
+    tr.ingest(obs(1.0, 300, 700), 1.0)  # sensor record T-D1-001 (smaller ID than the cue's)
+    tr.add_cue("T-EXT-001", (302, 699), 2.0)
+    tr._merge_duplicates("T-EXT-001")
+    rec = tr.records["T-D1-001"]
+    assert "T-EXT-001" in rec.aliases and rec.is_cue  # allocatable as a cue, not timed out as an unconfirmed detection
