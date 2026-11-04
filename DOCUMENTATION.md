@@ -98,6 +98,17 @@ CrewAI web dashboard.
   drone auction (2024). Qualitative table only, because their problems and metrics differ; check each row against the
   paper before the viva.
 
+## 5d. Benchmark fixes (queue, retry, no double assignment)
+
+After a benchmark against two similar projects (completion 61%, 0/10 missions finished with 4 drones and targets every
+20 s) the allocation was extended; see the README section "Benchmark fixes" for the new `allocation.*` keys and their
+defaults (`max_queue` 4, `retry_unassigned` true, `retry_period` 10, `retry_max_s` 600, `skip_completed_sites` true).
+In short: drones hold a short queue of tasks and bid the marginal cost of inserting a target (battery reserve checked
+over the whole queue), a second win is re-checked at commit time and queued or released, unassigned targets are
+retried, finished drones fly straight to their next target, and a target that was already inspected is not inspected
+again. The old behaviour is restored exactly with `max_queue: 1`, `retry_unassigned: false`,
+`skip_completed_sites: false`. Before/after numbers: `docs/BENCHMARK_BEFORE_AFTER.md`.
+
 ## 6. Setup
 
 Plain simulation: Python 3.10+ (3.14 works with `pygame-ce`).

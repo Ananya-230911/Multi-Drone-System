@@ -612,3 +612,35 @@ Result with 10 seeds: 120 of 120 runs met their expectations. Geofence violation
 - `partition` shows 0% agreement with the centralized optimum on purpose: during the split each side only knew its own drones, so its winner differs from the all-knowing optimum. After the heal exactly one owner remains and the target is logged once.
 - If the network heals while both owners are already hovering over the target (heal at 40 s in the test) both briefly share the airspace and one separation violation is recorded; the target is still logged once. The shipped scenario heals earlier.
 - One of ten `limited_comms` seeds ends with a duplicate inspection; it is detected and marked in the target log (`duplicate_inspection = True`), as the acceptance rule requires.
+
+## Benchmark fixes: task queue, retry, no double assignment (new config keys)
+
+A benchmark against two similar open-source projects (4 drones, 8 targets arriving every 20 s) showed the drones
+completing 61% of the targets and finishing 0 of 10 missions. These fixes address the causes. Every new behaviour has a
+config key; to get the old behaviour back set `allocation.max_queue: 1`, `allocation.retry_unassigned: false` and
+`allocation.skip_completed_sites: false` (the event logs are then byte-identical to the previous version; tested).
+
+| Key (under `allocation:`) | Default | Meaning |
+|---|---|---|
+| `max_queue` | `4` | Tasks one drone may hold: the active one plus queued ones. `1` = old single-task behaviour. |
+| `retry_unassigned` | `true` | An auction with no feasible bidder is retried instead of cancelling the target (only when some drone refused for a passing reason: queue full, busy, safety hold; if every refusal is permanent - no route, no inspection point, not enough battery - the target is cancelled at once as before). |
+| `retry_period` | `10.0` | Seconds between retries. |
+| `retry_max_s` | `600.0` | After this long without any drone able to take it the target is cancelled as before. |
+| `skip_completed_sites` | `true` | A new record that appears on top of an already completed target is never auctioned again (stops the endless re-inspection of a stationary target). |
+
+**What changed in behaviour**
+1. *Task queue.* A busy drone can bid. Its bid for a new target is the marginal cost of inserting it behind its active
+   task (time until it would reach it, extra energy), and the battery reserve is checked over the whole plan including
+   the way home. A drone still flies one target at a time. An idle drone bids exactly as before.
+2. *Double assignment.* A bid computed while a drone was idle is re-checked against what the drone holds when the
+   auction commits. A second win is queued if still feasible, otherwise released so the others re-auction it;
+   `current_task` is never overwritten.
+3. *Re-inspection.* See `skip_completed_sites`.
+4. *Direct chaining.* After a target the drone flies straight to the next queued one (new drone-mode transitions
+   RETURNING to ENROUTE / INSPECTING) and returns to the patrol loop only when its queue is empty.
+5. *Failure recovery.* A reopened task is accepted into another drone's queue by the same bidding.
+6. *Cue merged into a sensor detection.* If an announced target (cue) merged with a drone's own detection of it, the
+   merged record was later cancelled as an unconfirmed detection; it now keeps the cue's allocatable status.
+
+New event type `TASK_QUEUED`. Limitation: with `max_queue: 1` a drone that wins two simultaneous auctions releases the
+second one and is excluded from its re-auction (the old behaviour overwrote its task and lost both).
