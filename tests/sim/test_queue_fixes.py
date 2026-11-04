@@ -202,3 +202,22 @@ def test_releasing_for_lack_of_room_does_not_exclude_the_drone_from_the_next_epo
     rec = w.drones["D1"].tracker.records
     assert all(not r.excluded for r in rec.values())
     assert logged(w) == {0, 1}
+
+
+def test_two_drones_one_fails_every_target_is_still_inspected():
+    cues = [(5.0, p) for p in TARGETS[:6]]
+    w = run(scenario(2, cues, fail=("D1", 40.0)))
+    assert logged(w) == {0, 1, 2, 3, 4, 5}
+    assert not w.log.of_type("TASK_CANCELLED")  # neither "no bidders" nor "max_reallocations" dropped one
+
+
+def test_release_for_lack_of_room_does_not_use_up_max_reallocations():
+    from src.tracking.target_state import TargetState, TransitionContext, apply_transition, new_record
+
+    rec, _ = new_record("T", "external_cue", 0.0, "EXT", (0.0, 0.0), 0.0)
+    apply_transition(rec, TargetState.ALLOCATED, TransitionContext("D1", 1.0, winner="D1", feasible_bids=1), "t")
+    apply_transition(rec, TargetState.DETECTED, TransitionContext("D1", 2.0, trigger="release", exclude_owner=False, max_reallocations=2), "room")
+    assert rec.reallocations == 0 and rec.epoch == 1 and not rec.excluded
+    rec.owner = "D1"; rec.state = TargetState.ALLOCATED
+    apply_transition(rec, TargetState.DETECTED, TransitionContext("D1", 3.0, trigger="release", max_reallocations=2), "fault")
+    assert rec.reallocations == 1 and rec.excluded == {2: "D1"}
