@@ -24,3 +24,15 @@ def test_single_target_result_has_no_multi_fields():
     res = run(request())
     assert "tv" not in res["frames"][0] and len(res["targets"]) == 1
     assert res["summary"]["per_target"][0]["state"] == "COMPLETED"
+
+
+def test_announcement_time_and_the_target_each_bid_round_is_about():
+    r = two_targets()
+    r["targets"][1]["at"] = 30
+    res = run(r)
+    assert [t["cue_t"] for t in res["targets"]] == [5.0, 35.0]
+    by_target = {}
+    for rnd in res["allocations"]:
+        by_target.setdefault(rnd["target_index"], []).append(rnd["t"])
+    assert set(by_target) == {0, 1}
+    assert min(by_target[0]) < 10 and min(by_target[1]) >= 35.0  # target 2's bidding starts only when it is announced

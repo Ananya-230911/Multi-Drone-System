@@ -255,6 +255,7 @@ L.control.scale({metric:true, imperial:false}).addTo(map);
 const S = {w:2000, h:2000, bounds:null, rect:null, drones:[], target:null, tmarker:null, picking:null, zcorners:[], zrect:null,
            result:null, view:null, pin:null, tkind:null, acorners:[], atmp:null, extra:[]};
 const MIN_KM = 0.8, MAX_KM = 12;
+const TCOL = ["#ff4d4d", "#ffb347", "#46a0ff", "#78e68c", "#be78ff", "#00c8c8", "#ff7bd1", "#e6e6e6"];
 function mPerPx() { return 156543.03 * Math.cos(map.getCenter().lat * Math.PI / 180) / Math.pow(2, map.getZoom()); }
 
 function offset(lat0, lon0, dx, dy) {
@@ -581,6 +582,11 @@ function startPlayback(res) {
   });
   L_.lock = L.polyline([], {color:"#ff4d4d", weight:3, dashArray:"8 6", interactive:false}).addTo(map); all.push(L_.lock);
   L_.route = L.polyline([], {color:"#ffe066", weight:3, opacity:.9, interactive:false}).addTo(map); all.push(L_.route);
+  const tl_ = [S.target, ...S.extra];  // the command: a ring at each target and a line from it to every drone when it is announced
+  L_.ann = (res.targets || []).map((_, k) => ({
+    ring: L.circle([tl_[k].lat, tl_[k].lon], {radius:1, color:TCOL[k % TCOL.length], weight:3, fillOpacity:0, opacity:0, interactive:false}).addTo(map),
+    lines: S.drones.map(() => L.polyline([], {color:TCOL[k % TCOL.length], weight:2, dashArray:"4 6", interactive:false}).addTo(map))}));
+  L_.ann.forEach(a => all.push(a.ring, ...a.lines));
   L_.xlock = S.extra.map(() => { const l = L.polyline([], {color:"#ff4d4d", weight:3, dashArray:"8 6", interactive:false}).addTo(map); all.push(l); return l; });
   P.layers = L_; syncCentre(); if (S.pin) { S.pin.remove(); S.pin = null; }
   map.fitBounds(S.rect.getBounds(), {paddingTopLeft:[30, 60], paddingBottomRight:[440, 80]});  // leave room for the panel
@@ -614,6 +620,14 @@ function render(force) {
     P.layers.trail[k].setStyle({color:col});
     if (changed) { d.marker.setIcon(mkIcon(d.id, col, a[6] ? "parked" : MODE_SHORT[mode]));
       P.layers.trail[k].setLatLngs(F.slice(0, i + 1).map(f => [f.d[k][0], f.d[k][1]]).concat([[lat, lon]])); }
+  });
+  const ANN = 3.0;  // seconds the announcement stays visible
+  let announcing = 0;
+  (R.targets || []).forEach((tg, k) => {
+    const a = P.layers.ann[k], dt = P.t - tg.cue_t, on = dt >= 0 && dt < ANN, fade = on ? 1 - dt / ANN : 0, tl = k === 0 ? S.target : S.extra[k - 1];
+    if (on) announcing++;
+    a.ring.setRadius(on ? 10 + dt * Math.max(S.w, S.h) / 8 : 1); a.ring.setStyle({opacity: fade * .9});
+    a.lines.forEach((l, j) => { l.setLatLngs(on ? [[tl.lat, tl.lon], S.drones[j].marker.getLatLng()] : []); l.setStyle({opacity: fade}); });
   });
   const ownerIdx = f0.owner ? S.drones.findIndex(d => d.id === f0.owner) : -1;
   const tstate = R.target_states[f0.ts];
@@ -654,8 +668,9 @@ function render(force) {
   else if (done) { bn.className = ""; bn.textContent = "MISSION COMPLETE: target neutralized by " + done.text.match(/by (\w+)/)[1]; bn.style.display = "block"; }
   else if (logged) { bn.className = ""; bn.textContent = "TARGET LOGGED by " + logged.actor; bn.style.display = "block"; }
   else if (cancelled) { bn.className = "warn"; bn.textContent = "TASK CANCELLED: " + cancelled.text.replace(/^\s*[\d.]+\s*/, ""); bn.style.display = "block"; }
+  else if (announcing) { bn.className = ""; bn.textContent = `COMMAND SENT to all ${S.drones.length} drones: ${R.targets.length > 1 ? announcing + " new target" + (announcing > 1 ? "s" : "") : "target"}`; bn.style.display = "block"; }
   else bn.style.display = "none";
-  if (changed) renderPanel(f0, i);
+  if (changed || announcing) renderPanel(f0, i);
 }
 function mode0Owner(f) { return !!f.owner; }
 function renderPanel(f, i) {
@@ -673,10 +688,12 @@ function renderPanel(f, i) {
   } else h += "</table><h3>Target</h3>" + R.target_states[f.ts].replace("_", " ") +
        (f.owner ? ` &middot; owner <b>${f.owner}</b>` : "") + (f.lock !== null ? ` &middot; lock <b>${f.lock.toFixed(1)}</b> s` : "") +
        (f.neutralized ? ' &middot; <b style="color:#ff6b6b">NEUTRALIZED</b>' : "");
-  const al = [...R.allocations].reverse().find(a => a.t <= t);
-  if (al) {
+  const rounds = P.multi
+    ? R.targets.map((_, k) => ({k, al: [...R.allocations].reverse().find(a => a.t <= t && a.target_index === k)})).filter(x => x.al)
+    : [{k: null, al: [...R.allocations].reverse().find(a => a.t <= t)}].filter(x => x.al);
+  for (const {k, al} of rounds) {
     const done = al.committed_at !== null && al.committed_at <= t;
-    h += `<h3>Bids &middot; round ${al.epoch}${done ? "" : " (deciding...)"}</h3><table><tr><th></th><th>reach</th><th>route</th><th>batt after</th><th>cost</th><th></th></tr>`;
+    h += `<h3>Bids${k !== null ? ` &middot; <span style="color:${TCOL[k % TCOL.length]}">target ${k + 1}</span>` : ""} &middot; round ${al.epoch}${done ? "" : " (deciding...)"}</h3><table><tr><th></th><th>reach</th><th>route</th><th>batt after</th><th>cost</th><th></th></tr>`;
     al.bids.forEach(b => {
       const win = done && b.drone === al.winner;
       h += b.feasible

@@ -14,7 +14,7 @@ from src.config import ConfigError
 from src.sim.world import World
 from src.viz.describe import describe
 from src.webmap.geo import GeoFrame
-from src.webmap.scenario_builder import RequestError, build_config, target_list
+from src.webmap.scenario_builder import CUE_T0, RequestError, build_config, target_list
 
 FRAME_S = 0.5
 AFTER_DONE_S = 12.0  # keep recording this long after the mission ends (drone flies home)
@@ -83,11 +83,11 @@ def run(req: dict) -> dict[str, Any]:
         "target_states": TARGET_STATES,
         "frames": frames,
         "events": _events(w),
-        "allocations": _allocations(w),
+        "allocations": _allocations(w, gts, fr),
         "routes": _routes(w, fr),
         "zones": [[list(fr.to_latlon(*p)) for p in z.raw.exterior.coords[:-1]] for z in w.fence.zones],
         "target": {"lat": tl[0]["lat"], "lon": tl[0]["lon"]},
-        "targets": [{"lat": t["lat"], "lon": t["lon"], "at": t["at"]} for t in tl],
+        "targets": [{"lat": t["lat"], "lon": t["lon"], "at": t["at"], "cue_t": CUE_T0 + t["at"]} for t in tl],
         "area_m": [round(fr.width), round(fr.h)],
         "summary": _summary(w, gts),
         "t_end": w.t,
@@ -142,13 +142,16 @@ def _events(w: World) -> list[dict]:
     return out
 
 
-def _allocations(w: World) -> list[dict]:
-    """Bid tables (one per allocation round) with the committed winner, for the page's BIDS panel."""
+def _allocations(w: World, gts: list, fr: GeoFrame) -> list[dict]:
+    """Bid tables (one per allocation round) with the committed winner, for the page's BIDS panel.
+    `target_index` = which requested target the round is about (nearest one to the estimate the drones bid on)."""
     rounds: dict[tuple[str, int], dict] = {}
     for e in w.log.of_type("BID_COMPUTED"):
         key = (e["target_id"], e["epoch"])
+        est = e["data"].get("target_est")
+        idx = min(range(len(gts)), key=lambda i: math.dist(est, gts[i])) if est and gts else 0
         r = rounds.setdefault(key, {"target_id": key[0], "epoch": key[1], "t": e["t"], "bids": [], "winner": None,
-                                    "committed_at": None})  # fmt: skip
+                                    "committed_at": None, "target_index": idx})  # fmt: skip
         b, d = e["data"]["breakdown"], e["data"]
         r["bids"].append({
             "drone": e["actor"], "feasible": d["feasible"], "reason": d["reason"], "cost": b.get("cost"),
