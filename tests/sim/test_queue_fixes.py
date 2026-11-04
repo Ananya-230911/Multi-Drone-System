@@ -187,3 +187,18 @@ def test_switching_the_new_keys_off_restores_the_old_event_log_exactly(name):
     w = World(off)
     w.run()
     assert w.log.digest() == OLD_DIGESTS[name]
+
+
+def test_lone_survivor_takes_over_every_task_of_the_failed_drone():
+    cues = [(5.0, p) for p in TARGETS[:5]]
+    w = run(scenario(2, cues, fail=("D1", 25.0)))
+    assert logged(w) == {0, 1, 2, 3, 4}
+    assert not w.log.of_type("TASK_CANCELLED")  # nothing was dropped because the only drone left was "excluded"
+    assert {r["owner"] for r in w.target_log_rows() if r["final_state"] == "COMPLETED"} <= {"D1", "D2"}
+
+
+def test_releasing_for_lack_of_room_does_not_exclude_the_drone_from_the_next_epoch():
+    w = run(scenario(1, [(5.0, TARGETS[0]), (5.0, TARGETS[1])], max_queue=1))
+    rec = w.drones["D1"].tracker.records
+    assert all(not r.excluded for r in rec.values())
+    assert logged(w) == {0, 1}

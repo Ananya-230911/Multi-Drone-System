@@ -642,5 +642,5 @@ config key; to get the old behaviour back set `allocation.max_queue: 1`, `alloca
 6. *Cue merged into a sensor detection.* If an announced target (cue) merged with a drone's own detection of it, the
    merged record was later cancelled as an unconfirmed detection; it now keeps the cue's allocatable status.
 
-New event type `TASK_QUEUED`. Limitation: with `max_queue: 1` a drone that wins two simultaneous auctions releases the
-second one and is excluded from its re-auction (the old behaviour overwrote its task and lost both).
+New event type `TASK_QUEUED`. A drone that wins a second target it has no room for gives it back without being excluded from the re-auction
+(new `exclude_owner` flag in the target-state transition context, default `true` = old behaviour for every other release).

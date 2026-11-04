@@ -116,6 +116,7 @@ class TransitionContext:
     logged: bool = False  # row 15
     reacquire_action: str = "cancel"  # row 13 vs 16
     max_reallocations: int = 2  # row 16
+    exclude_owner: bool = True  # row 16: keep the releasing owner out of the next epoch (False: it only lacked capacity)
 
 
 class IllegalTransition(RuntimeError):
@@ -230,7 +231,7 @@ def apply_transition(rec: TargetRecord, to: TargetState, ctx: TransitionContext,
     if row.n in (4, 5):
         rec.owner = ctx.winner
     elif row.n == 16:
-        if rec.owner is not None:
+        if rec.owner is not None and ctx.exclude_owner:
             rec.excluded[rec.epoch + 1] = rec.owner
         rec.epoch += 1
         rec.reallocations += 1

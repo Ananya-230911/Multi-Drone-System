@@ -307,14 +307,14 @@ class MissionMixin:
             self._release_target(now, tid, reason, detail)
         self._end_mission(now, f"released:{reason}")
 
-    def _release_target(self: "Drone", now: float, tid: str, reason: str, detail: str = "") -> None:
+    def _release_target(self: "Drone", now: float, tid: str, reason: str, detail: str = "", exclude: bool = True) -> None:
         rec = self.tracker.record(tid) if tid else None
         if rec is not None and not rec.terminal:
             to = S.DETECTED if rec.is_cue else S.CONFIRMED
             trig = {"battery_reserve": "battery_reserve", "route_unreachable": "route_unreachable"}.get(reason, "reacquire_timeout")
             old_epoch = rec.epoch
             self.outbox.send("RELEASE", now, {"reason": reason, "detail": detail}, target_id=rec.id, epoch=old_epoch)
-            if not self._lifecycle(now, rec, to, f"release:{reason}", trigger=trig,
+            if not self._lifecycle(now, rec, to, f"release:{reason}", trigger=trig, exclude_owner=exclude,
                                    reacquire_action="reallocate", max_reallocations=self.shared.allocation.max_reallocations):  # fmt: skip
                 self._lifecycle(now, rec, S.CANCELLED, "max_reallocations", trigger="max_reallocations")
                 self._emit(now, "TASK_CANCELLED", {"reason": "max_reallocations"}, target_id=rec.id, epoch=rec.epoch)
@@ -375,7 +375,9 @@ class MissionMixin:
             reason = f"not_feasible_now:{bid.reason}"
         elif al.max_queue <= 1:
             reason = "busy"
-        self._release_target(now, tid, reason)
+        # It only lacked room: the next auction needs no exclusion (its own bid will say queue_full / not feasible),
+        # and excluding it would strand the task when it is the only drone left.
+        self._release_target(now, tid, reason, exclude=False)
 
     def _release_queue(self: "Drone", now: float, reason: str) -> None:
         queued, self.queue = self.queue, []
